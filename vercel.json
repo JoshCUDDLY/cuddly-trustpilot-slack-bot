@@ -1,14 +1,9 @@
 {
   "version": 2,
-  "functions": {
-    "api/bot.js": {
-      "maxDuration": 30
-    }
-  },
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "api/bot.js"
+      "dest": "/api/bot.js"
     }
   ]
 }
