@@ -153,13 +153,27 @@ app.event('reaction_added', async ({ event, client }) => {
   } catch (e) { console.error('Reaction handler error:', e.message); }
 });
 
-// ── EXPORT HANDLER FOR VERCEL ─────────────────────────────────────────
+// ── VERCEL SERVERLESS EXPORT ──────────────────────────────────────────
+// Challenge handler MUST be first — before Bolt touches the request
 module.exports = async (req, res) => {
-  // Handle Slack URL verification challenge
-  if (req.body && req.body.type === 'url_verification') {
-    res.status(200).json({ challenge: req.body.challenge });
-    return;
+  try {
+    // Parse body if it came in as a buffer
+    let body = req.body;
+    if (Buffer.isBuffer(body)) body = JSON.parse(body.toString());
+    if (typeof body === 'string') body = JSON.parse(body);
+
+    // Slack URL verification — respond immediately
+    if (body && body.type === 'url_verification') {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).end(JSON.stringify({ challenge: body.challenge }));
+      return;
+    }
+
+    // All other Slack events — hand to Bolt
+    req.body = body;
+    await receiver.app(req, res);
+  } catch (e) {
+    console.error('Handler error:', e.message);
+    res.status(200).end(); // always return 200 to Slack to prevent retries
   }
-  // Hand off to Bolt receiver
-  await receiver.app(req, res);
 };
