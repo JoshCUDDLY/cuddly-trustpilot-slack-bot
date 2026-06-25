@@ -7,11 +7,16 @@ React with 🔁 on any review to regenerate a fresh draft.
 
 ## Setup Guide
 
-### Step 1 — Create your Slack App
+> **Important:** Follow these steps in order. You need your live Vercel URL before
+> Slack can verify your endpoint — so we deploy first, then finish the Slack setup.
+
+---
+
+### Step 1 — Create your Slack App (partial)
 
 1. Go to **api.slack.com/apps** → click **"Create New App"**
 2. Choose **"From scratch"**
-3. Name it `CUDDLY Review Bot` and select your CUDDLY workspace
+3. Name it `CUDDLY Trustpilot Review Bot` and select your CUDDLY workspace
 4. Click **Create App**
 
 ### Step 2 — Configure Bot Permissions
@@ -27,64 +32,67 @@ In your app dashboard, go to **OAuth & Permissions** → **Scopes** → **Bot To
 - `users:read`
 - `users:read.email`
 
-### Step 3 — Enable Event Subscriptions
-
-1. Go to **Event Subscriptions** → toggle **Enable Events** ON
-2. Set the Request URL to: `https://your-vercel-url.vercel.app/slack/events`
-3. Under **Subscribe to bot events**, add:
-   - `message.channels`
-   - `message.groups` ← for private channels
-   - `reaction_added`
-4. Click **Save Changes**
-
-### Step 4 — Enable Socket Mode (for local dev only)
-
-If testing locally:
-1. Go to **Socket Mode** → Enable Socket Mode
-2. Create an App-Level Token with `connections:write` scope
-3. Copy the `xapp-...` token → that's your `SLACK_APP_TOKEN`
-
-### Step 5 — Install App to Workspace
+### Step 3 — Install App to Workspace & collect tokens
 
 1. Go to **OAuth & Permissions** → click **"Install to Workspace"**
 2. Copy the **Bot User OAuth Token** (starts with `xoxb-`) → `SLACK_BOT_TOKEN`
 3. Go to **Basic Information** → copy **Signing Secret** → `SLACK_SIGNING_SECRET`
+4. Go to **Basic Information** → **App-Level Tokens** → click **"Generate Token"**
+   - Name it anything, add scope `connections:write`
+   - Copy the token (starts with `xapp-`) → `SLACK_APP_TOKEN`
 
-### Step 6 — Invite Bot to Channel
-
-In Slack, open **#cs-trustpilot-reviews** and type:
-```
-/invite @CUDDLY Review Bot
-```
-
-Then right-click the channel → **View channel details** → scroll to bottom to find the **Channel ID** (starts with `C`) → copy it → `TP_CHANNEL_ID`
-
-### Step 7 — Get your Supabase Service Key
+### Step 4 — Get your Supabase Service Key
 
 1. Go to **Supabase → Project Settings → API**
 2. Copy the **service_role** key (NOT the anon key)
 3. That's your `SUPABASE_SERVICE_KEY`
 
-### Step 8 — Get your Anthropic API Key
+### Step 5 — Get your Anthropic API Key
 
 1. Go to **console.anthropic.com → API Keys**
 2. Create a new key and copy it → `ANTHROPIC_API_KEY`
 
-### Step 9 — Deploy to Vercel
+### Step 6 — Get your Slack Channel ID
+
+In Slack, open **#cs-trustpilot-reviews** → right-click the channel name → **View channel details** → scroll to the very bottom to find the **Channel ID** (starts with `C`) → copy it → `TP_CHANNEL_ID`
+
+### Step 7 — Deploy to Vercel
 
 1. Create a new GitHub repo called `cuddly-slack-bot`
-2. Push all these files to it
+2. Upload all these files to it
 3. Go to **vercel.com** → New Project → Import the repo
-4. Under **Environment Variables**, add all 6 variables from `.env.example`
-5. Deploy!
+4. Under **Environment Variables**, add all 6 variables:
+   - `SLACK_BOT_TOKEN`
+   - `SLACK_SIGNING_SECRET`
+   - `SLACK_APP_TOKEN`
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_KEY`
+   - `ANTHROPIC_API_KEY`
+   - `TP_CHANNEL_ID`
+5. Click **Deploy** and copy your live Vercel URL
 
-### Step 10 — Update Slack Event URL
+### Step 8 — Enable Event Subscriptions (now that you have a live URL)
 
-Once deployed, copy your Vercel URL and update it in:
-**Slack App → Event Subscriptions → Request URL**
+1. Go back to your Slack App → **Event Subscriptions** → toggle **Enable Events** ON
+2. Set the Request URL to:
+   ```
+   https://your-vercel-url.vercel.app/slack/events
+   ```
+3. Wait for the green **✅ Verified** confirmation
+4. Under **Subscribe to bot events**, add:
+   - `message.channels`
+   - `message.groups` ← for private channels
+   - `reaction_added`
+5. Click **Save Changes**
+
+### Step 9 — Invite Bot to Channel
+
+In Slack, open **#cs-trustpilot-reviews** and type:
 ```
-https://your-vercel-url.vercel.app/slack/events
+/invite @CUDDLY Trustpilot Review Bot
 ```
+
+That's it — the bot is live! 🐾
 
 ---
 
