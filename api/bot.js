@@ -136,7 +136,10 @@ async function processReview(client, channelId, messageTs, rawText) {
 app.message(async ({ message, client }) => {
   try {
     if (message.channel !== TP_CHANNEL) return;
-    if (message.bot_id) return;
+    // Block our own bot's messages but allow Trustpilot app messages
+    if (message.bot_id && message.bot_id === process.env.OWN_BOT_ID) return;
+    // Block messages from bots that aren't Trustpilot
+    if (message.bot_id && !message.text?.includes('Verified') && !message.text?.match(/[★✭⭐]/)) return;
     if (message.thread_ts && message.thread_ts !== message.ts) return;
     await processReview(client, message.channel, message.ts, message.text || '');
   } catch (e) { console.error('Message handler error:', e.message); }
@@ -148,7 +151,9 @@ app.event('reaction_added', async ({ event, client }) => {
     if (event.item.type !== 'message') return;
     const result = await client.conversations.history({ channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true });
     const originalMsg = result.messages?.[0];
-    if (!originalMsg || originalMsg.bot_id) return;
+    if (!originalMsg) return;
+    // Allow retrigger on Trustpilot bot messages — just block our own drafts
+    if (originalMsg.bot_profile?.name?.toLowerCase().includes('cuddly')) return;
     await processReview(client, event.item.channel, event.item.ts, originalMsg.text || '');
   } catch (e) { console.error('Reaction handler error:', e.message); }
 });
