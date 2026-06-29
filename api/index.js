@@ -191,7 +191,8 @@ module.exports = async (req, res) => {
     }
 
     // Reaction
-    if (event.type === 'reaction_added' && event.reaction === RETRIGGER_EMOJI) {
+    console.log(`Reaction received: "${event.reaction}" looking for "${RETRIGGER_EMOJI}"`);
+    if (event.type === 'reaction_added' && (event.reaction === RETRIGGER_EMOJI || event.reaction === 'arrows_counterclockwise' || event.reaction === 'repeat')) {
       console.log(`Reaction event: ${event.reaction} on ${event.item?.type}`);
       if (event.item?.type !== 'message') return;
       const result = await slackPost('conversations.history', {
