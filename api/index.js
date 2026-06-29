@@ -9,6 +9,7 @@ const SUPABASE_KEY         = process.env.SUPABASE_SERVICE_KEY;
 const ANTHROPIC_KEY        = process.env.ANTHROPIC_API_KEY;
 const TP_CHANNEL           = process.env.TP_CHANNEL_ID;
 const ADMIN_EMAIL          = 'joshua@cuddly.com';
+const ADMIN_SLACK_ID       = 'U06L2KNL17W';
 
 const RETRIGGER_EMOJI  = 'arrows_counterclockwise';
 const APPROVE_EMOJI    = 'white_check_mark';   // ✅ good draft — :white_check_mark:
@@ -31,11 +32,16 @@ async function slackPost(method, body) {
   return res.json();
 }
 
-async function getUserEmail(userId) {
+async function getUserInfo(userId) {
   try {
     const res = await slackPost('users.info', { user: userId });
-    return res.user?.profile?.email || null;
-  } catch (e) { return null; }
+    const email = res.user?.profile?.email || null;
+    const isAdmin = userId === ADMIN_SLACK_ID || email === ADMIN_EMAIL;
+    return { email, isAdmin };
+  } catch (e) {
+    // Fallback — check Slack ID directly even if email lookup fails
+    return { email: null, isAdmin: userId === ADMIN_SLACK_ID };
+  }
 }
 
 // ── MACROS ────────────────────────────────────────────────────────────
@@ -382,8 +388,8 @@ module.exports = async (req, res) => {
       }
       if (event.thread_ts && event.thread_ts !== event.ts) {
         // This is a thread reply — check if it's an edit response
-        const userEmail = await getUserEmail(event.user);
-        const isAdmin = userEmail === ADMIN_EMAIL;
+        const { email: userEmail, isAdmin } = await getUserInfo(event.user);
+        // isAdmin already set from getUserInfo
         const handled = await handleEditReply(userEmail, isAdmin, event.text || '', event.thread_ts);
         if (handled) {
           const confirmMsg = isAdmin
@@ -415,13 +421,29 @@ module.exports = async (req, res) => {
 
       // ML feedback signals
       if ([APPROVE_EMOJI, EDIT_EMOJI, REJECT_EMOJI].includes(emoji)) {
-        const userEmail = await getUserEmail(event.user);
-        const isAdmin = userEmail === ADMIN_EMAIL;
+        // First check — is this reaction on a bot draft message or the original review?
+        // We only learn from reactions on bot draft messages, not on original reviews.
+        // This lets the team use ✅ on original reviews to mark them as handled without
+        // affecting the AI learning at all.
+        const reactedResult = await slackPost('conversations.history', {
+          channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true
+        });
+        const reactedMsg = reactedResult.messages?.[0];
+        const isBotDraft = reactedMsg?.bot_profile?.name?.toLowerCase().includes('cuddly') &&
+                           reactedMsg?.text?.includes('CUDDLY Response Draft');
+        if (!isBotDraft) {
+          console.log('Reaction on non-bot message — skipping ML signal');
+          res.status(200).end(); return;
+        }
+
+        const { email: userEmail, isAdmin } = await getUserInfo(event.user);
         console.log(`ML signal: ${emoji} from ${userEmail} isAdmin: ${isAdmin}`);
 
-        // Find the bot draft being reacted to
-        const draftMsg = await findBotDraftInThread(event.item.channel, event.item.ts);
-        const session = await getSession(event.item.ts);
+        // Get the original review ts from the draft's thread_ts
+        let reviewTs = reactedMsg.thread_ts || event.item.ts;
+        let session = await getSession(reviewTs);
+        const draftMsg = reactedMsg;
+        console.log(`Session found: ${!!session} reviewTs: ${reviewTs}`);
 
         if (emoji === APPROVE_EMOJI) {
           const draft = draftMsg?.text?.split('---')?.[1]?.trim() || session?.draft_posted || '';
