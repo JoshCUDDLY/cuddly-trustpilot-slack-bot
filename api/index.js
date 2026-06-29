@@ -433,33 +433,38 @@ module.exports = async (req, res) => {
         // Bot drafts live in threads so we need conversations.replies, not history
         // Try replies first (for threaded draft messages), fall back to history
         let reactedMsg = null;
+        let reviewTs = null;
         try {
-          // Use chat.getPermalink approach — fetch message directly via its ts
-          // conversations.replies needs the THREAD root ts, not the reply ts
-          // So first try history to get the message and find its thread_ts
+          // The bot draft is a thread REPLY — history only returns root messages
+          // Strategy: search recent history for a root message that has a thread
+          // containing our target ts, then fetch that thread
           const histResult = await slackPost('conversations.history', {
             channel: event.item.channel,
-            latest: event.item.ts,
-            limit: 10,
-            inclusive: true
+            limit: 50
           });
           console.log(`History fetch: ok=${histResult.ok} count=${histResult.messages?.length}`);
-          // Find exact message by ts
-          reactedMsg = histResult.messages?.find(m => m.ts === event.item.ts);
-          if (!reactedMsg) {
-            // Not in history — must be a thread reply, need to use replies API
-            // But we need the thread root ts — check all messages for thread context
-            // Try fetching as a reply by using the ts directly as thread root
+
+          // Find root message whose thread contains our target ts
+          // Root messages that have replies will have reply_count > 0
+          const threadRoots = histResult.messages?.filter(m => m.reply_count > 0) || [];
+          console.log(`Thread roots found: ${threadRoots.length}`);
+
+          for (const root of threadRoots) {
             const repliesResult = await slackPost('conversations.replies', {
               channel: event.item.channel,
-              ts: event.item.ts,  // try as thread root first
-              limit: 50
+              ts: root.ts,
+              limit: 20
             });
-            if (repliesResult.ok) {
-              reactedMsg = repliesResult.messages?.find(m => m.ts === event.item.ts);
+            if (!repliesResult.ok) continue;
+            const found = repliesResult.messages?.find(m => m.ts === event.item.ts);
+            if (found) {
+              reactedMsg = found;
+              reviewTs = root.ts;
+              console.log(`Found draft in thread rooted at: ${reviewTs}`);
+              break;
             }
           }
-          console.log(`Reacted msg found: ${!!reactedMsg} text: "${reactedMsg?.text?.substring(0,60)}"`);
+          console.log(`Reacted msg found: ${!!reactedMsg} reviewTs: ${reviewTs} text: "${reactedMsg?.text?.substring(0,60)}"`);
         } catch(e) { console.error('Fetch reacted msg error:', e.message); }
         // Debug — log what we see on the reacted message
         console.log(`Reacted msg bot_profile: ${reactedMsg?.bot_profile?.name} username: ${reactedMsg?.username} text snippet: "${reactedMsg?.text?.substring(0,60)}"`);
@@ -477,8 +482,8 @@ module.exports = async (req, res) => {
         const { email: userEmail, isAdmin } = await getUserInfo(event.user);
         console.log(`ML signal: ${emoji} from ${userEmail} isAdmin: ${isAdmin}`);
 
-        // Get the original review ts from the draft's thread_ts
-        let reviewTs = reactedMsg.thread_ts || event.item.ts;
+        // reviewTs was set during message fetch above
+        reviewTs = reviewTs || reactedMsg?.thread_ts || event.item.ts;
         let session = await getSession(reviewTs);
         const draftMsg = reactedMsg;
         console.log(`Session found: ${!!session} reviewTs: ${reviewTs}`);
