@@ -382,25 +382,31 @@ module.exports = async (req, res) => {
 
     // ── NEW REVIEW MESSAGE ──────────────────────────────────────────
     if (event.type === 'message' && event.channel === TP_CHANNEL) {
+      console.log(`Message: subtype=${event.subtype} bot=${event.bot_profile?.name} thread=${event.thread_ts} ts=${event.ts}`);
       if (event.subtype) { res.status(200).end(); return; }
       if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) {
         res.status(200).end(); return;
       }
       if (event.thread_ts && event.thread_ts !== event.ts) {
-        // This is a thread reply — check if it's an edit response
-        const { email: userEmail, isAdmin } = await getUserInfo(event.user);
-        // isAdmin already set from getUserInfo
-        const handled = await handleEditReply(userEmail, isAdmin, event.text || '', event.thread_ts);
-        if (handled) {
-          const confirmMsg = isAdmin
-            ? '✅ Got it! I\'ve learned from your edit.'
-            : '📋 Got it! Your edit has been submitted for admin review.';
-          await slackPost('chat.postMessage', { channel: event.channel, thread_ts: event.thread_ts, text: confirmMsg });
-        }
+        // Thread reply — check if it's an edit response from a user
+        try {
+          const { email: userEmail, isAdmin } = await getUserInfo(event.user);
+          const handled = await handleEditReply(userEmail, isAdmin, event.text || '', event.thread_ts);
+          if (handled) {
+            const confirmMsg = isAdmin
+              ? '✅ Got it! I have learned from your edit.'
+              : '📋 Got it! Your edit has been submitted for admin review.';
+            await slackPost('chat.postMessage', { channel: event.channel, thread_ts: event.thread_ts, text: confirmMsg });
+          }
+        } catch(e) { console.error('Thread reply handler error:', e.message); }
         res.status(200).end(); return;
       }
-      const eventText = extractMessageText(event);
-      await processReview(event.channel, event.ts, eventText);
+      // Root level message — process as new review
+      try {
+        const eventText = extractMessageText(event);
+        console.log(`New review text: "${eventText.substring(0,80)}"`);
+        await processReview(event.channel, event.ts, eventText);
+      } catch(e) { console.error('Process review error:', e.message); }
       res.status(200).end(); return;
     }
 
@@ -422,13 +428,27 @@ module.exports = async (req, res) => {
       // ML feedback signals
       if ([APPROVE_EMOJI, EDIT_EMOJI, REJECT_EMOJI].includes(emoji)) {
         // First check — is this reaction on a bot draft message or the original review?
-        // We only learn from reactions on bot draft messages, not on original reviews.
-        // This lets the team use ✅ on original reviews to mark them as handled without
-        // affecting the AI learning at all.
-        const reactedResult = await slackPost('conversations.history', {
-          channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true
-        });
-        const reactedMsg = reactedResult.messages?.[0];
+        // Bot drafts live in threads so we need conversations.replies, not history
+        // Try replies first (for threaded draft messages), fall back to history
+        let reactedMsg = null;
+        try {
+          // Most bot drafts are in threads — fetch the specific message by ts
+          const repliesResult = await slackPost('conversations.replies', {
+            channel: event.item.channel,
+            ts: event.item.ts,
+            limit: 1,
+            inclusive: true
+          });
+          // conversations.replies returns the whole thread — find our specific message
+          reactedMsg = repliesResult.messages?.find(m => m.ts === event.item.ts);
+          // If not found in replies, try history (for root-level messages)
+          if (!reactedMsg) {
+            const histResult = await slackPost('conversations.history', {
+              channel: event.item.channel, latest: event.item.ts, oldest: event.item.ts, limit: 1, inclusive: true
+            });
+            reactedMsg = histResult.messages?.[0];
+          }
+        } catch(e) { console.error('Fetch reacted msg error:', e.message); }
         // Debug — log what we see on the reacted message
         console.log(`Reacted msg bot_profile: ${reactedMsg?.bot_profile?.name} username: ${reactedMsg?.username} text snippet: "${reactedMsg?.text?.substring(0,60)}"`);
         const isBotDraft = (
