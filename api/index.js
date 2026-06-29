@@ -383,6 +383,8 @@ module.exports = async (req, res) => {
     // ── NEW REVIEW MESSAGE ──────────────────────────────────────────
     if (event.type === 'message' && event.channel === TP_CHANNEL) {
       console.log(`Message: subtype=${event.subtype} bot=${event.bot_profile?.name} thread=${event.thread_ts} ts=${event.ts}`);
+      // Immediately ignore any bot messages (our own drafts fire message events)
+      if (event.bot_id || event.subtype === 'bot_message') { res.status(200).end(); return; }
       if (event.subtype) { res.status(200).end(); return; }
       if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) {
         res.status(200).end(); return;
@@ -432,22 +434,32 @@ module.exports = async (req, res) => {
         // Try replies first (for threaded draft messages), fall back to history
         let reactedMsg = null;
         try {
-          // Most bot drafts are in threads — fetch the specific message by ts
-          const repliesResult = await slackPost('conversations.replies', {
+          // Use chat.getPermalink approach — fetch message directly via its ts
+          // conversations.replies needs the THREAD root ts, not the reply ts
+          // So first try history to get the message and find its thread_ts
+          const histResult = await slackPost('conversations.history', {
             channel: event.item.channel,
-            ts: event.item.ts,
-            limit: 1,
+            latest: event.item.ts,
+            limit: 10,
             inclusive: true
           });
-          // conversations.replies returns the whole thread — find our specific message
-          reactedMsg = repliesResult.messages?.find(m => m.ts === event.item.ts);
-          // If not found in replies, try history (for root-level messages)
+          console.log(`History fetch: ok=${histResult.ok} count=${histResult.messages?.length}`);
+          // Find exact message by ts
+          reactedMsg = histResult.messages?.find(m => m.ts === event.item.ts);
           if (!reactedMsg) {
-            const histResult = await slackPost('conversations.history', {
-              channel: event.item.channel, latest: event.item.ts, oldest: event.item.ts, limit: 1, inclusive: true
+            // Not in history — must be a thread reply, need to use replies API
+            // But we need the thread root ts — check all messages for thread context
+            // Try fetching as a reply by using the ts directly as thread root
+            const repliesResult = await slackPost('conversations.replies', {
+              channel: event.item.channel,
+              ts: event.item.ts,  // try as thread root first
+              limit: 50
             });
-            reactedMsg = histResult.messages?.[0];
+            if (repliesResult.ok) {
+              reactedMsg = repliesResult.messages?.find(m => m.ts === event.item.ts);
+            }
           }
+          console.log(`Reacted msg found: ${!!reactedMsg} text: "${reactedMsg?.text?.substring(0,60)}"`);
         } catch(e) { console.error('Fetch reacted msg error:', e.message); }
         // Debug — log what we see on the reacted message
         console.log(`Reacted msg bot_profile: ${reactedMsg?.bot_profile?.name} username: ${reactedMsg?.username} text snippet: "${reactedMsg?.text?.substring(0,60)}"`);
