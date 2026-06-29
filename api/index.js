@@ -8,7 +8,7 @@ const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_KEY         = process.env.SUPABASE_SERVICE_KEY;
 const ANTHROPIC_KEY        = process.env.ANTHROPIC_API_KEY;
 const TP_CHANNEL           = process.env.TP_CHANNEL_ID;
-const RETRIGGER_EMOJI      = 'repeat';
+const RETRIGGER_EMOJI      = 'arrows_counterclockwise';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -195,15 +195,18 @@ module.exports = async (req, res) => {
     if (event.type === 'reaction_added' && (event.reaction === RETRIGGER_EMOJI || event.reaction === 'arrows_counterclockwise' || event.reaction === 'repeat')) {
       console.log(`Reaction event: ${event.reaction} on ${event.item?.type}`);
       if (event.item?.type !== 'message') return;
+      console.log(`Fetching message from channel: ${event.item.channel} ts: ${event.item.ts}`);
       const result = await slackPost('conversations.history', {
         channel: event.item.channel,
         latest: event.item.ts,
         limit: 1,
         inclusive: true
       });
+      console.log(`History result ok: ${result.ok} error: ${result.error} messages: ${result.messages?.length}`);
       const msg = result.messages?.[0];
-      if (!msg) return;
-      if (msg.bot_profile?.name?.toLowerCase().includes('cuddly')) return;
+      if (!msg) { console.log('No message found'); return; }
+      console.log(`Message text: "${msg.text?.substring(0,80)}" bot: ${msg.bot_profile?.name}`);
+      if (msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { console.log('Skipping own bot message'); return; }
       await processReview(event.item.channel, event.item.ts, msg.text || '');
       return;
     }
