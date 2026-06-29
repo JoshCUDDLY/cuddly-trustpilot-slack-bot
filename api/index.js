@@ -435,36 +435,23 @@ module.exports = async (req, res) => {
         let reactedMsg = null;
         let reviewTs = null;
         try {
-          // The bot draft is a thread REPLY — history only returns root messages
-          // Strategy: search recent history for a root message that has a thread
-          // containing our target ts, then fetch that thread
-          const histResult = await slackPost('conversations.history', {
-            channel: event.item.channel,
-            limit: 50
-          });
-          console.log(`History fetch: ok=${histResult.ok} count=${histResult.messages?.length}`);
+          // Use reactions.getInfo — directly returns the message a reaction was added to
+          // This is the most reliable approach regardless of thread depth or history window
+          const reactionInfo = await fetch(
+            `https://slack.com/api/reactions.get?channel=${event.item.channel}&timestamp=${event.item.ts}&full=true`,
+            { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` } }
+          );
+          const reactionData = await reactionInfo.json();
+          console.log(`reactions.get: ok=${reactionData.ok} error=${reactionData.error} type=${reactionData.type}`);
 
-          // Find root message whose thread contains our target ts
-          // Root messages that have replies will have reply_count > 0
-          const threadRoots = histResult.messages?.filter(m => m.reply_count > 0) || [];
-          console.log(`Thread roots found: ${threadRoots.length}`);
-
-          for (const root of threadRoots) {
-            const repliesResult = await slackPost('conversations.replies', {
-              channel: event.item.channel,
-              ts: root.ts,
-              limit: 20
-            });
-            if (!repliesResult.ok) continue;
-            const found = repliesResult.messages?.find(m => m.ts === event.item.ts);
-            if (found) {
-              reactedMsg = found;
-              reviewTs = root.ts;
-              console.log(`Found draft in thread rooted at: ${reviewTs}`);
-              break;
-            }
+          if (reactionData.ok && reactionData.message) {
+            reactedMsg = reactionData.message;
+            // thread_ts is the original review ts
+            reviewTs = reactedMsg.thread_ts || event.item.ts;
+            console.log(`Reacted msg found via reactions.get: text="${reactedMsg.text?.substring(0,60)}" thread_ts=${reviewTs}`);
+          } else {
+            console.log(`reactions.get failed: ${reactionData.error}`);
           }
-          console.log(`Reacted msg found: ${!!reactedMsg} reviewTs: ${reviewTs} text: "${reactedMsg?.text?.substring(0,60)}"`);
         } catch(e) { console.error('Fetch reacted msg error:', e.message); }
         // Debug — log what we see on the reacted message
         console.log(`Reacted msg bot_profile: ${reactedMsg?.bot_profile?.name} username: ${reactedMsg?.username} text snippet: "${reactedMsg?.text?.substring(0,60)}"`);
