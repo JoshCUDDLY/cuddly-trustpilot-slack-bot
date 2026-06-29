@@ -2,13 +2,8 @@
   "name": "cuddly-slack-bot",
   "version": "1.0.0",
   "description": "CUDDLY Trustpilot Slack bot — auto-drafts review replies",
-  "main": "api/bot.js",
-  "scripts": {
-    "dev": "node api/bot.js",
-    "start": "node api/bot.js"
-  },
+  "main": "api/index.js",
   "dependencies": {
-    "@slack/bolt": "^3.17.0",
     "@supabase/supabase-js": "^2.39.0",
     "node-fetch": "^2.7.0"
   },
