@@ -8,7 +8,12 @@ const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_KEY         = process.env.SUPABASE_SERVICE_KEY;
 const ANTHROPIC_KEY        = process.env.ANTHROPIC_API_KEY;
 const TP_CHANNEL           = process.env.TP_CHANNEL_ID;
-const RETRIGGER_EMOJI      = 'arrows_counterclockwise';
+const ADMIN_EMAIL          = 'joshua@cuddly.com';
+
+const RETRIGGER_EMOJI  = 'arrows_counterclockwise';
+const APPROVE_EMOJI    = 'white_check_mark';   // ✅ good draft
+const EDIT_EMOJI       = 'pencil';             // ✏️ I edited before sending
+const REJECT_EMOJI     = 'thumbsdown';         // 👎 wrong macro/tone
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -16,7 +21,7 @@ let tpUsedResponses = [];
 let cachedMacros = [];
 let macroLoadedAt = null;
 
-// ── SLACK API HELPER ──────────────────────────────────────────────────
+// ── SLACK API ─────────────────────────────────────────────────────────
 async function slackPost(method, body) {
   const res = await fetch(`https://slack.com/api/${method}`, {
     method: 'POST',
@@ -24,6 +29,13 @@ async function slackPost(method, body) {
     body: JSON.stringify(body)
   });
   return res.json();
+}
+
+async function getUserEmail(userId) {
+  try {
+    const res = await slackPost('users.info', { user: userId });
+    return res.user?.profile?.email || null;
+  } catch (e) { return null; }
 }
 
 // ── MACROS ────────────────────────────────────────────────────────────
@@ -39,7 +51,7 @@ async function getMacros() {
 
 async function getStyleProfile() {
   try {
-    const { data } = await sb.from('style_profiles').select('preferences').eq('side', 'trustpilot').limit(1).single();
+    const { data } = await sb.from('style_profiles').select('preferences').eq('side', 'trustpilot').order('updated_at', { ascending: false }).limit(1).single();
     if (data) return JSON.parse(data.preferences || '[]');
   } catch (e) {}
   return [];
@@ -52,12 +64,9 @@ async function getOverridePatterns() {
   } catch (e) { return []; }
 }
 
-// ── EXTRACT TEXT FROM SLACK MESSAGE ─────────────────────────────────
+// ── PARSE REVIEW ──────────────────────────────────────────────────────
 function extractMessageText(msg) {
-  // Try plain text first
   if (msg.text && msg.text.trim().length > 10) return msg.text;
-
-  // Try attachments (most Trustpilot integrations use this)
   if (msg.attachments && msg.attachments.length > 0) {
     const parts = [];
     for (const att of msg.attachments) {
@@ -65,40 +74,21 @@ function extractMessageText(msg) {
       if (att.text) parts.push(att.text);
       if (att.pretext) parts.push(att.pretext);
       if (att.title) parts.push(att.title);
-      // Check attachment fields
-      if (att.fields) {
-        for (const f of att.fields) {
-          if (f.value) parts.push(f.value);
-        }
-      }
+      if (att.fields) for (const f of att.fields) { if (f.value) parts.push(f.value); }
     }
     if (parts.length > 0) return parts.join(' ');
   }
-
-  // Try blocks
   if (msg.blocks && msg.blocks.length > 0) {
     const parts = [];
     for (const block of msg.blocks) {
       if (block.text?.text) parts.push(block.text.text);
-      if (block.fields) {
-        for (const f of block.fields) {
-          if (f.text) parts.push(f.text);
-        }
-      }
-      if (block.elements) {
-        for (const el of block.elements) {
-          if (el.text?.text) parts.push(el.text.text);
-          if (el.text) parts.push(typeof el.text === 'string' ? el.text : '');
-        }
-      }
+      if (block.fields) for (const f of block.fields) { if (f.text) parts.push(f.text); }
     }
     if (parts.length > 0) return parts.join(' ');
   }
-
   return msg.text || '';
 }
 
-// ── PARSE REVIEW ──────────────────────────────────────────────────────
 function parseSlackReview(raw) {
   const starMatch = raw.match(/[★✭⭐]+/);
   const stars = starMatch ? starMatch[0].replace(/[^★✭⭐]/g, '').length : 0;
@@ -162,8 +152,183 @@ async function generateDraft(reviewText, stars, tone, macro, styleProfile, overr
 // ── LOG SESSION ───────────────────────────────────────────────────────
 async function logSession(ts, channel, reviewText, stars, tone, macroTitle, draft) {
   try {
-    await sb.from('bot_sessions').upsert({ slack_message_ts: ts, slack_channel: channel, review_text: reviewText.substring(0, 500), stars, tone, macro_used: macroTitle, draft_posted: draft.substring(0, 1000), created_at: new Date().toISOString() }, { onConflict: 'slack_message_ts' });
+    await sb.from('bot_sessions').upsert({
+      slack_message_ts: ts, slack_channel: channel,
+      review_text: reviewText.substring(0, 500), stars, tone,
+      macro_used: macroTitle, draft_posted: draft.substring(0, 1000),
+      created_at: new Date().toISOString()
+    }, { onConflict: 'slack_message_ts' });
   } catch (e) { console.error('Session log error:', e.message); }
+}
+
+// ── ML: FIND DRAFT MESSAGE IN THREAD ─────────────────────────────────
+async function findBotDraftInThread(channelId, threadTs) {
+  try {
+    const result = await slackPost('conversations.replies', {
+      channel: channelId, ts: threadTs, limit: 20
+    });
+    if (!result.ok) return null;
+    // Find the most recent bot draft message
+    const drafts = result.messages?.filter(m =>
+      m.bot_profile?.name?.toLowerCase().includes('cuddly') &&
+      m.text?.includes('CUDDLY Response Draft')
+    );
+    return drafts?.[drafts.length - 1] || null;
+  } catch (e) { return null; }
+}
+
+// ── ML: GET SESSION FOR MESSAGE ───────────────────────────────────────
+async function getSession(messageTs) {
+  try {
+    const { data } = await sb.from('bot_sessions').select('*').eq('slack_message_ts', messageTs).single();
+    return data || null;
+  } catch (e) { return null; }
+}
+
+// ── ML: SAVE POSITIVE SIGNAL ──────────────────────────────────────────
+async function savePositiveSignal(userEmail, isAdmin, session, draft) {
+  try {
+    // Extract style pattern via AI
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 100, messages: [{ role: 'user', content: `This Trustpilot response was approved as good:\n"${draft.substring(0, 300)}"\n\nIn one short sentence describe the style pattern. Start with "Prefers:"` }] })
+    });
+    const data = await res.json();
+    const pattern = data.content?.[0]?.text || `Approved: "${draft.substring(0, 80)}..."`;
+
+    if (isAdmin) {
+      // Admin signals go directly to style_profiles
+      const { data: existing } = await sb.from('style_profiles').select('id, preferences').eq('side', 'trustpilot').single();
+      const prefs = existing ? JSON.parse(existing.preferences || '[]') : [];
+      prefs.push(pattern);
+      if (prefs.length > 20) prefs.splice(0, prefs.length - 20);
+      if (existing) {
+        await sb.from('style_profiles').update({ preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' }).eq('id', existing.id);
+      } else {
+        await sb.from('style_profiles').insert({ side: 'trustpilot', preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' });
+      }
+      console.log(`✅ Admin positive signal saved to style_profiles`);
+    } else {
+      // Non-admin goes to pending_edits
+      await sb.from('pending_edits').insert({
+        user_email: userEmail, side: 'trustpilot', source: 'slack',
+        original_draft: draft.substring(0, 1000),
+        suggested_edit: draft.substring(0, 1000),
+        macro_title: session?.macro_used || '',
+        review_snippet: session?.review_text?.substring(0, 200) || '',
+        status: 'pending', created_at: new Date().toISOString()
+      });
+      console.log(`📋 Non-admin positive signal saved to pending_edits`);
+    }
+  } catch (e) { console.error('Positive signal error:', e.message); }
+}
+
+// ── ML: SAVE NEGATIVE SIGNAL ──────────────────────────────────────────
+async function saveNegativeSignal(userEmail, isAdmin, session) {
+  try {
+    const entry = {
+      user_id: null, side: 'trustpilot', source: 'slack',
+      email_snippet: session?.review_text?.substring(0, 300) || '',
+      ai_macro: session?.macro_used || '',
+      chosen_macro: `[thumbsdown: ${session?.macro_used || 'unknown'}]`,
+      created_at: new Date().toISOString()
+    };
+    if (isAdmin) {
+      await sb.from('override_patterns').insert({ ...entry, source: 'slack' });
+      console.log(`✅ Admin negative signal saved to override_patterns`);
+    } else {
+      await sb.from('pending_edits').insert({
+        user_email: userEmail, side: 'trustpilot', source: 'slack',
+        original_draft: session?.draft_posted || '',
+        suggested_edit: `[thumbsdown: wrong macro - ${session?.macro_used}]`,
+        macro_title: session?.macro_used || '',
+        review_snippet: session?.review_text?.substring(0, 200) || '',
+        status: 'pending', created_at: new Date().toISOString()
+      });
+      console.log(`📋 Non-admin negative signal saved to pending_edits`);
+    }
+  } catch (e) { console.error('Negative signal error:', e.message); }
+}
+
+// ── ML: HANDLE EDIT SIGNAL ────────────────────────────────────────────
+async function handleEditSignal(client, userEmail, isAdmin, session, channelId, threadTs) {
+  try {
+    // Prompt user to paste their edited version in the thread
+    await slackPost('chat.postMessage', {
+      channel: channelId,
+      thread_ts: threadTs,
+      text: `✏️ <@${session?.user_id || 'there'}> — paste your edited version here and I'll learn from it! Just reply in this thread with your final response.`,
+    });
+    // Store a pending edit record waiting for the reply
+    await sb.from('pending_edits').insert({
+      user_email: userEmail, side: 'trustpilot', source: 'slack',
+      original_draft: session?.draft_posted || '',
+      suggested_edit: '',
+      macro_title: session?.macro_used || '',
+      review_snippet: session?.review_text?.substring(0, 200) || '',
+      status: isAdmin ? 'awaiting_edit_admin' : 'awaiting_edit',
+      created_at: new Date().toISOString()
+    });
+    console.log(`✏️ Edit signal — prompted user for edited version`);
+  } catch (e) { console.error('Edit signal error:', e.message); }
+}
+
+// ── ML: HANDLE EDIT REPLY ─────────────────────────────────────────────
+async function handleEditReply(userEmail, isAdmin, messageText, threadTs) {
+  try {
+    // Find the pending awaiting_edit record for this thread
+    const { data: pending } = await sb.from('pending_edits')
+      .select('*')
+      .in('status', ['awaiting_edit_admin', 'awaiting_edit'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    if (!pending) return false;
+
+    const editedDraft = messageText.trim();
+    const originalDraft = pending.original_draft;
+
+    if (isAdmin) {
+      // Admin edit — extract pattern and save directly
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 150, messages: [{ role: 'user', content: `Original draft:\n"${originalDraft.substring(0, 200)}"\n\nEdited version:\n"${editedDraft.substring(0, 200)}"\n\nIn one short sentence describe what changed and why. Start with "Prefers:"` }] })
+      });
+      const data = await res.json();
+      const pattern = data.content?.[0]?.text || `Prefers: "${editedDraft.substring(0, 80)}..."`;
+
+      // Save to style_profiles
+      const { data: existing } = await sb.from('style_profiles').select('id, preferences').eq('side', 'trustpilot').single();
+      const prefs = existing ? JSON.parse(existing.preferences || '[]') : [];
+      prefs.push(pattern);
+      if (prefs.length > 20) prefs.splice(0, prefs.length - 20);
+      if (existing) {
+        await sb.from('style_profiles').update({ preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' }).eq('id', existing.id);
+      } else {
+        await sb.from('style_profiles').insert({ side: 'trustpilot', preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' });
+      }
+
+      // Log to edit_logs
+      await sb.from('edit_logs').insert({
+        side: 'trustpilot', source: 'slack',
+        original_draft: originalDraft.substring(0, 1000),
+        edited_draft: editedDraft.substring(0, 1000),
+        macro_title: pending.macro_title,
+        created_at: new Date().toISOString()
+      });
+
+      // Update pending record
+      await sb.from('pending_edits').update({ suggested_edit: editedDraft, status: 'approved', reviewed_at: new Date().toISOString() }).eq('id', pending.id);
+      console.log(`✅ Admin edit saved and learned from immediately`);
+    } else {
+      // Non-admin — update pending record for admin review
+      await sb.from('pending_edits').update({ suggested_edit: editedDraft, status: 'pending', user_email: userEmail }).eq('id', pending.id);
+      console.log(`📋 Non-admin edit saved to pending_edits for review`);
+    }
+    return true;
+  } catch (e) { console.error('Edit reply error:', e.message); return false; }
 }
 
 // ── DETECTION BAR ─────────────────────────────────────────────────────
@@ -176,101 +341,111 @@ function formatDetectionBar(stars, tone, macroTitle) {
 
 // ── PROCESS REVIEW ────────────────────────────────────────────────────
 async function processReview(channelId, messageTs, rawText) {
-  console.log(`Processing review: channel=${channelId} ts=${messageTs} text="${rawText.substring(0,50)}"`);
+  console.log(`Processing: ts=${messageTs} text="${rawText.substring(0,50)}"`);
   const hasStars = /[★✭⭐]/.test(rawText);
   const hasVerified = /verified/i.test(rawText);
-  if (!hasStars && !hasVerified && rawText.length < 20) {
-    console.log('Skipping — not a TP review');
-    return;
-  }
+  if (!hasStars && !hasVerified && rawText.length < 20) { console.log('Skipping — not TP review'); return; }
   const { stars, reviewText } = parseSlackReview(rawText);
-  console.log(`Parsed: stars=${stars} reviewText="${reviewText.substring(0,50)}"`);
   const [macros, styleProfile, overridePatterns, tone] = await Promise.all([getMacros(), getStyleProfile(), getOverridePatterns(), detectTone(reviewText, stars)]);
-  console.log(`Got ${macros.length} macros, tone=${tone}`);
   if (!macros.length) { console.error('No macros loaded'); return; }
   const macro = selectMacro(macros, tone);
-  console.log(`Selected macro: ${macro.title}`);
   const draft = await generateDraft(reviewText, stars, tone, macro, styleProfile, overridePatterns);
   const detectionBar = formatDetectionBar(stars, tone, macro.title);
   const postResult = await slackPost('chat.postMessage', {
-    channel: channelId,
-    thread_ts: messageTs,
-    text: `*CUDDLY Response Draft* 🐾\n\n${detectionBar}\n\n---\n\n${draft}\n\n---\n_React with 🔁 to regenerate_`,
+    channel: channelId, thread_ts: messageTs,
+    text: `*CUDDLY Response Draft* 🐾\n\n${detectionBar}\n\n---\n\n${draft}\n\n---\n_✅ Good draft  ·  ✏️ I edited this  ·  👎 Wrong macro  ·  🔁 Regenerate_`,
     unfurl_links: false
   });
-  console.log(`Post result: ${JSON.stringify(postResult?.ok)} error: ${postResult?.error}`);
+  console.log(`Draft posted: ${postResult?.ok} error: ${postResult?.error}`);
   await logSession(messageTs, channelId, reviewText, stars, tone, macro.title, draft);
 }
 
 // ── MAIN HANDLER ──────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  if (req.method === 'GET') {
-    res.status(200).send('CUDDLY Slack bot is running 🐾');
-    return;
-  }
+  if (req.method === 'GET') { res.status(200).send('CUDDLY Slack bot is running 🐾'); return; }
 
   try {
-    // Vercel pre-parses the body — use it directly
     const body = req.body || {};
-    console.log(`Received event type: ${body.type} event: ${body.event?.type}`);
+    console.log(`Event: ${body.type} / ${body.event?.type}`);
 
     // URL verification
-    if (body.type === 'url_verification') {
-      res.status(200).json({ challenge: body.challenge });
-      return;
-    }
+    if (body.type === 'url_verification') { res.status(200).json({ challenge: body.challenge }); return; }
 
     const event = body.event;
-    if (!event) { 
-      console.log('No event in body');
-      res.status(200).end();
-      return; 
-    }
+    if (!event) { res.status(200).end(); return; }
 
-    // New message
+    // ── NEW REVIEW MESSAGE ──────────────────────────────────────────
     if (event.type === 'message' && event.channel === TP_CHANNEL) {
-      console.log(`Message event: bot_profile=${event.bot_profile?.name} subtype=${event.subtype}`);
       if (event.subtype) { res.status(200).end(); return; }
-      if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) { res.status(200).end(); return; }
-      if (event.thread_ts && event.thread_ts !== event.ts) { res.status(200).end(); return; }
+      if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) {
+        res.status(200).end(); return;
+      }
+      if (event.thread_ts && event.thread_ts !== event.ts) {
+        // This is a thread reply — check if it's an edit response
+        const userEmail = await getUserEmail(event.user);
+        const isAdmin = userEmail === ADMIN_EMAIL;
+        const handled = await handleEditReply(userEmail, isAdmin, event.text || '', event.thread_ts);
+        if (handled) {
+          const confirmMsg = isAdmin
+            ? '✅ Got it! I\'ve learned from your edit.'
+            : '📋 Got it! Your edit has been submitted for admin review.';
+          await slackPost('chat.postMessage', { channel: event.channel, thread_ts: event.thread_ts, text: confirmMsg });
+        }
+        res.status(200).end(); return;
+      }
       const eventText = extractMessageText(event);
       await processReview(event.channel, event.ts, eventText);
-      res.status(200).end();
-      return;
+      res.status(200).end(); return;
     }
 
-    // Reaction
-    console.log(`Reaction received: "${event.reaction}" looking for "${RETRIGGER_EMOJI}"`);
-    if (event.type === 'reaction_added' && (event.reaction === RETRIGGER_EMOJI || event.reaction === 'arrows_counterclockwise' || event.reaction === 'repeat')) {
-      console.log(`Reaction event: ${event.reaction} on ${event.item?.type}`);
-      if (event.item?.type !== 'message') { res.status(200).end(); return; }
-      console.log(`Fetching message from channel: ${event.item.channel} ts: ${event.item.ts}`);
-      const result = await slackPost('conversations.history', {
-        channel: event.item.channel,
-        latest: event.item.ts,
-        limit: 1,
-        inclusive: true
-      });
-      console.log(`History result ok: ${result.ok} error: ${result.error} messages: ${result.messages?.length}`);
-      const msg = result.messages?.[0];
-      if (!msg) { console.log('No message found'); res.status(200).end(); return; }
-      console.log(`Full msg keys: ${Object.keys(msg).join(', ')}`);
-      console.log(`Attachments: ${msg.attachments?.length || 0} Blocks: ${msg.blocks?.length || 0}`);
-      if (msg.attachments?.[0]) console.log(`First attachment: ${JSON.stringify(msg.attachments[0]).substring(0,300)}`);
-      if (msg.blocks?.[0]) console.log(`First block: ${JSON.stringify(msg.blocks[0]).substring(0,300)}`);
-      const msgText = extractMessageText(msg);
-      console.log(`Message text extracted: "${msgText.substring(0,80)}" bot: ${msg.bot_profile?.name}`);
-      if (msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { console.log('Skipping own bot message'); res.status(200).end(); return; }
-      await processReview(event.item.channel, event.item.ts, msgText);
-      res.status(200).end();
-      return;
+    // ── REACTION ADDED ──────────────────────────────────────────────
+    if (event.type === 'reaction_added') {
+      const emoji = event.reaction;
+      console.log(`Reaction: ${emoji}`);
+
+      // Regenerate
+      if (emoji === RETRIGGER_EMOJI) {
+        if (event.item?.type !== 'message') { res.status(200).end(); return; }
+        const result = await slackPost('conversations.history', { channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true });
+        const msg = result.messages?.[0];
+        if (!msg || msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { res.status(200).end(); return; }
+        await processReview(event.item.channel, event.item.ts, extractMessageText(msg));
+        res.status(200).end(); return;
+      }
+
+      // ML feedback signals
+      if ([APPROVE_EMOJI, EDIT_EMOJI, REJECT_EMOJI].includes(emoji)) {
+        const userEmail = await getUserEmail(event.user);
+        const isAdmin = userEmail === ADMIN_EMAIL;
+        console.log(`ML signal: ${emoji} from ${userEmail} isAdmin: ${isAdmin}`);
+
+        // Find the bot draft being reacted to
+        const draftMsg = await findBotDraftInThread(event.item.channel, event.item.ts);
+        const session = await getSession(event.item.ts);
+
+        if (emoji === APPROVE_EMOJI) {
+          const draft = draftMsg?.text?.split('---')?.[1]?.trim() || session?.draft_posted || '';
+          await savePositiveSignal(userEmail, isAdmin, session, draft);
+          if (isAdmin) {
+            await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: event.item.ts, text: '✅ Great — learned from this draft!' });
+          }
+        } else if (emoji === REJECT_EMOJI) {
+          await saveNegativeSignal(userEmail, isAdmin, session);
+          if (isAdmin) {
+            await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: event.item.ts, text: '👎 Noted — I\'ll avoid this macro for similar reviews.' });
+          }
+        } else if (emoji === EDIT_EMOJI) {
+          await handleEditSignal(null, userEmail, isAdmin, session, event.item.channel, event.item.ts);
+        }
+        res.status(200).end(); return;
+      }
     }
 
-    console.log(`Unhandled event type: ${event.type}`);
+    console.log(`Unhandled: ${event.type}`);
     res.status(200).end();
 
   } catch (e) {
-    console.error('Handler error:', e.message, e.stack);
+    console.error('Handler error:', e.message);
     res.status(200).end();
   }
 };
