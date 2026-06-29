@@ -220,20 +220,22 @@ module.exports = async (req, res) => {
       return;
     }
 
-    // Respond 200 immediately to Slack
-    res.status(200).end();
-
     const event = body.event;
-    if (!event) { console.log('No event in body'); return; }
+    if (!event) { 
+      console.log('No event in body');
+      res.status(200).end();
+      return; 
+    }
 
     // New message
     if (event.type === 'message' && event.channel === TP_CHANNEL) {
       console.log(`Message event: bot_profile=${event.bot_profile?.name} subtype=${event.subtype}`);
-      if (event.subtype) return; // skip edits, deletes etc
-      if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) return;
-      if (event.thread_ts && event.thread_ts !== event.ts) return;
+      if (event.subtype) { res.status(200).end(); return; }
+      if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) { res.status(200).end(); return; }
+      if (event.thread_ts && event.thread_ts !== event.ts) { res.status(200).end(); return; }
       const eventText = extractMessageText(event);
       await processReview(event.channel, event.ts, eventText);
+      res.status(200).end();
       return;
     }
 
@@ -241,7 +243,7 @@ module.exports = async (req, res) => {
     console.log(`Reaction received: "${event.reaction}" looking for "${RETRIGGER_EMOJI}"`);
     if (event.type === 'reaction_added' && (event.reaction === RETRIGGER_EMOJI || event.reaction === 'arrows_counterclockwise' || event.reaction === 'repeat')) {
       console.log(`Reaction event: ${event.reaction} on ${event.item?.type}`);
-      if (event.item?.type !== 'message') return;
+      if (event.item?.type !== 'message') { res.status(200).end(); return; }
       console.log(`Fetching message from channel: ${event.item.channel} ts: ${event.item.ts}`);
       const result = await slackPost('conversations.history', {
         channel: event.item.channel,
@@ -251,20 +253,21 @@ module.exports = async (req, res) => {
       });
       console.log(`History result ok: ${result.ok} error: ${result.error} messages: ${result.messages?.length}`);
       const msg = result.messages?.[0];
-      if (!msg) { console.log('No message found'); return; }
-      // Log full structure so we can see what Trustpilot sends
+      if (!msg) { console.log('No message found'); res.status(200).end(); return; }
       console.log(`Full msg keys: ${Object.keys(msg).join(', ')}`);
       console.log(`Attachments: ${msg.attachments?.length || 0} Blocks: ${msg.blocks?.length || 0}`);
       if (msg.attachments?.[0]) console.log(`First attachment: ${JSON.stringify(msg.attachments[0]).substring(0,300)}`);
       if (msg.blocks?.[0]) console.log(`First block: ${JSON.stringify(msg.blocks[0]).substring(0,300)}`);
       const msgText = extractMessageText(msg);
       console.log(`Message text extracted: "${msgText.substring(0,80)}" bot: ${msg.bot_profile?.name}`);
-      if (msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { console.log('Skipping own bot message'); return; }
+      if (msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { console.log('Skipping own bot message'); res.status(200).end(); return; }
       await processReview(event.item.channel, event.item.ts, msgText);
+      res.status(200).end();
       return;
     }
 
     console.log(`Unhandled event type: ${event.type}`);
+    res.status(200).end();
 
   } catch (e) {
     console.error('Handler error:', e.message, e.stack);
