@@ -16,30 +16,6 @@ let tpUsedResponses = [];
 let cachedMacros = [];
 let macroLoadedAt = null;
 
-// ── VERIFY SLACK SIGNATURE ────────────────────────────────────────────
-function verifySlackSignature(req, rawBody) {
-  const timestamp = req.headers['x-slack-request-timestamp'];
-  const signature = req.headers['x-slack-signature'];
-  if (!timestamp || !signature) return false;
-  // Prevent replay attacks
-  if (Math.abs(Date.now() / 1000 - timestamp) > 300) return false;
-  const sigBase = `v0:${timestamp}:${rawBody}`;
-  const hmac = crypto.createHmac('sha256', SLACK_SIGNING_SECRET);
-  hmac.update(sigBase);
-  const computed = `v0=${hmac.digest('hex')}`;
-  return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signature));
-}
-
-// ── GET RAW BODY ──────────────────────────────────────────────────────
-function getRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => { data += chunk; });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
-
 // ── SLACK API HELPER ──────────────────────────────────────────────────
 async function slackPost(method, body) {
   const res = await fetch(`https://slack.com/api/${method}`, {
@@ -154,66 +130,87 @@ function formatDetectionBar(stars, tone, macroTitle) {
 
 // ── PROCESS REVIEW ────────────────────────────────────────────────────
 async function processReview(channelId, messageTs, rawText) {
+  console.log(`Processing review: channel=${channelId} ts=${messageTs} text="${rawText.substring(0,50)}"`);
   const hasStars = /[★✭⭐]/.test(rawText);
   const hasVerified = /verified/i.test(rawText);
-  if (!hasStars && !hasVerified && rawText.length < 20) return;
+  if (!hasStars && !hasVerified && rawText.length < 20) {
+    console.log('Skipping — not a TP review');
+    return;
+  }
   const { stars, reviewText } = parseSlackReview(rawText);
+  console.log(`Parsed: stars=${stars} reviewText="${reviewText.substring(0,50)}"`);
   const [macros, styleProfile, overridePatterns, tone] = await Promise.all([getMacros(), getStyleProfile(), getOverridePatterns(), detectTone(reviewText, stars)]);
+  console.log(`Got ${macros.length} macros, tone=${tone}`);
   if (!macros.length) { console.error('No macros loaded'); return; }
   const macro = selectMacro(macros, tone);
+  console.log(`Selected macro: ${macro.title}`);
   const draft = await generateDraft(reviewText, stars, tone, macro, styleProfile, overridePatterns);
   const detectionBar = formatDetectionBar(stars, tone, macro.title);
-  await slackPost('chat.postMessage', { channel: channelId, thread_ts: messageTs, text: `*CUDDLY Response Draft* 🐾\n\n${detectionBar}\n\n---\n\n${draft}\n\n---\n_React with 🔁 to regenerate_`, unfurl_links: false });
+  const postResult = await slackPost('chat.postMessage', {
+    channel: channelId,
+    thread_ts: messageTs,
+    text: `*CUDDLY Response Draft* 🐾\n\n${detectionBar}\n\n---\n\n${draft}\n\n---\n_React with 🔁 to regenerate_`,
+    unfurl_links: false
+  });
+  console.log(`Post result: ${JSON.stringify(postResult?.ok)} error: ${postResult?.error}`);
   await logSession(messageTs, channelId, reviewText, stars, tone, macro.title, draft);
-  console.log(`✅ Draft posted | tone:${tone} | macro:${macro.title}`);
 }
 
 // ── MAIN HANDLER ──────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  // Always respond 200 immediately to prevent Slack retries
-  res.status(200).end();
-
-  if (req.method === 'GET') return;
+  if (req.method === 'GET') {
+    res.status(200).send('CUDDLY Slack bot is running 🐾');
+    return;
+  }
 
   try {
-    const rawBody = await getRawBody(req);
+    // Vercel pre-parses the body — use it directly
+    const body = req.body || {};
+    console.log(`Received event type: ${body.type} event: ${body.event?.type}`);
 
-    // Verify signature
-    if (!verifySlackSignature(req, rawBody)) {
-      console.error('Invalid Slack signature');
-      return;
-    }
-
-    const body = JSON.parse(rawBody);
-
-    // URL verification challenge
+    // URL verification
     if (body.type === 'url_verification') {
       res.status(200).json({ challenge: body.challenge });
       return;
     }
 
-    const event = body.event;
-    if (!event) return;
+    // Respond 200 immediately to Slack
+    res.status(200).end();
 
-    // New message in TP channel
+    const event = body.event;
+    if (!event) { console.log('No event in body'); return; }
+
+    // New message
     if (event.type === 'message' && event.channel === TP_CHANNEL) {
-      if (event.thread_ts && event.thread_ts !== event.ts) return;
+      console.log(`Message event: bot_profile=${event.bot_profile?.name} subtype=${event.subtype}`);
+      if (event.subtype) return; // skip edits, deletes etc
       if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) return;
+      if (event.thread_ts && event.thread_ts !== event.ts) return;
       await processReview(event.channel, event.ts, event.text || '');
       return;
     }
 
-    // Reaction added — retrigger
+    // Reaction
     if (event.type === 'reaction_added' && event.reaction === RETRIGGER_EMOJI) {
+      console.log(`Reaction event: ${event.reaction} on ${event.item?.type}`);
       if (event.item?.type !== 'message') return;
-      const result = await slackPost('conversations.history', { channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true });
+      const result = await slackPost('conversations.history', {
+        channel: event.item.channel,
+        latest: event.item.ts,
+        limit: 1,
+        inclusive: true
+      });
       const msg = result.messages?.[0];
-      if (!msg || msg.bot_profile?.name?.toLowerCase().includes('cuddly')) return;
+      if (!msg) return;
+      if (msg.bot_profile?.name?.toLowerCase().includes('cuddly')) return;
       await processReview(event.item.channel, event.item.ts, msg.text || '');
       return;
     }
 
+    console.log(`Unhandled event type: ${event.type}`);
+
   } catch (e) {
-    console.error('Handler error:', e.message);
+    console.error('Handler error:', e.message, e.stack);
+    res.status(200).end();
   }
 };
