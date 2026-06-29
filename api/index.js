@@ -52,6 +52,52 @@ async function getOverridePatterns() {
   } catch (e) { return []; }
 }
 
+// ── EXTRACT TEXT FROM SLACK MESSAGE ─────────────────────────────────
+function extractMessageText(msg) {
+  // Try plain text first
+  if (msg.text && msg.text.trim().length > 10) return msg.text;
+
+  // Try attachments (most Trustpilot integrations use this)
+  if (msg.attachments && msg.attachments.length > 0) {
+    const parts = [];
+    for (const att of msg.attachments) {
+      if (att.fallback) parts.push(att.fallback);
+      if (att.text) parts.push(att.text);
+      if (att.pretext) parts.push(att.pretext);
+      if (att.title) parts.push(att.title);
+      // Check attachment fields
+      if (att.fields) {
+        for (const f of att.fields) {
+          if (f.value) parts.push(f.value);
+        }
+      }
+    }
+    if (parts.length > 0) return parts.join(' ');
+  }
+
+  // Try blocks
+  if (msg.blocks && msg.blocks.length > 0) {
+    const parts = [];
+    for (const block of msg.blocks) {
+      if (block.text?.text) parts.push(block.text.text);
+      if (block.fields) {
+        for (const f of block.fields) {
+          if (f.text) parts.push(f.text);
+        }
+      }
+      if (block.elements) {
+        for (const el of block.elements) {
+          if (el.text?.text) parts.push(el.text.text);
+          if (el.text) parts.push(typeof el.text === 'string' ? el.text : '');
+        }
+      }
+    }
+    if (parts.length > 0) return parts.join(' ');
+  }
+
+  return msg.text || '';
+}
+
 // ── PARSE REVIEW ──────────────────────────────────────────────────────
 function parseSlackReview(raw) {
   const starMatch = raw.match(/[★✭⭐]+/);
@@ -186,7 +232,8 @@ module.exports = async (req, res) => {
       if (event.subtype) return; // skip edits, deletes etc
       if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) return;
       if (event.thread_ts && event.thread_ts !== event.ts) return;
-      await processReview(event.channel, event.ts, event.text || '');
+      const eventText = extractMessageText(event);
+      await processReview(event.channel, event.ts, eventText);
       return;
     }
 
@@ -205,9 +252,15 @@ module.exports = async (req, res) => {
       console.log(`History result ok: ${result.ok} error: ${result.error} messages: ${result.messages?.length}`);
       const msg = result.messages?.[0];
       if (!msg) { console.log('No message found'); return; }
-      console.log(`Message text: "${msg.text?.substring(0,80)}" bot: ${msg.bot_profile?.name}`);
+      // Log full structure so we can see what Trustpilot sends
+      console.log(`Full msg keys: ${Object.keys(msg).join(', ')}`);
+      console.log(`Attachments: ${msg.attachments?.length || 0} Blocks: ${msg.blocks?.length || 0}`);
+      if (msg.attachments?.[0]) console.log(`First attachment: ${JSON.stringify(msg.attachments[0]).substring(0,300)}`);
+      if (msg.blocks?.[0]) console.log(`First block: ${JSON.stringify(msg.blocks[0]).substring(0,300)}`);
+      const msgText = extractMessageText(msg);
+      console.log(`Message text extracted: "${msgText.substring(0,80)}" bot: ${msg.bot_profile?.name}`);
       if (msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { console.log('Skipping own bot message'); return; }
-      await processReview(event.item.channel, event.item.ts, msg.text || '');
+      await processReview(event.item.channel, event.item.ts, msgText);
       return;
     }
 
