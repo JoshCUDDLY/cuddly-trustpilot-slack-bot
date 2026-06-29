@@ -429,8 +429,14 @@ module.exports = async (req, res) => {
           channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true
         });
         const reactedMsg = reactedResult.messages?.[0];
-        const isBotDraft = reactedMsg?.bot_profile?.name?.toLowerCase().includes('cuddly') &&
-                           reactedMsg?.text?.includes('CUDDLY Response Draft');
+        // Debug — log what we see on the reacted message
+        console.log(`Reacted msg bot_profile: ${reactedMsg?.bot_profile?.name} username: ${reactedMsg?.username} text snippet: "${reactedMsg?.text?.substring(0,60)}"`);
+        const isBotDraft = (
+          reactedMsg?.text?.includes('CUDDLY Response Draft') ||
+          reactedMsg?.text?.includes('CUDDLY Slack bot') ||
+          reactedMsg?.username?.toLowerCase().includes('cuddly') ||
+          reactedMsg?.bot_profile?.name?.toLowerCase().includes('cuddly')
+        );
         if (!isBotDraft) {
           console.log('Reaction on non-bot message — skipping ML signal');
           res.status(200).end(); return;
