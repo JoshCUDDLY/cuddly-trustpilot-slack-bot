@@ -11,9 +11,9 @@ const TP_CHANNEL           = process.env.TP_CHANNEL_ID;
 const ADMIN_EMAIL          = 'joshua@cuddly.com';
 
 const RETRIGGER_EMOJI  = 'arrows_counterclockwise';
-const APPROVE_EMOJI    = 'white_check_mark';   // ✅ good draft
-const EDIT_EMOJI       = 'pencil';             // ✏️ I edited before sending
-const REJECT_EMOJI     = 'thumbsdown';         // 👎 wrong macro/tone
+const APPROVE_EMOJI    = 'white_check_mark';   // ✅ good draft — :white_check_mark:
+const EDIT_EMOJI       = 'pencil2';            // ✏️ I edited before sending — :pencil2:
+const REJECT_EMOJI     = 'thumbsdown';         // 👎 wrong macro/tone — :thumbsdown:
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -353,7 +353,7 @@ async function processReview(channelId, messageTs, rawText) {
   const detectionBar = formatDetectionBar(stars, tone, macro.title);
   const postResult = await slackPost('chat.postMessage', {
     channel: channelId, thread_ts: messageTs,
-    text: `*CUDDLY Response Draft* 🐾\n\n${detectionBar}\n\n---\n\n${draft}\n\n---\n_✅ Good draft  ·  ✏️ I edited this  ·  👎 Wrong macro  ·  🔁 Regenerate_`,
+    text: `*CUDDLY Response Draft* 🐾\n\n${detectionBar}\n\n---\n\n${draft}\n\n---\n_React to this draft: ✅ good  ·  ✏️ I edited this  ·  👎 wrong macro  ·  🔁 regenerate_`,
     unfurl_links: false
   });
   console.log(`Draft posted: ${postResult?.ok} error: ${postResult?.error}`);
