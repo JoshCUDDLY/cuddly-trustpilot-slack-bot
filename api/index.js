@@ -57,10 +57,27 @@ async function getMacros() {
 
 async function getStyleProfile() {
   try {
-    const { data } = await sb.from('style_profiles').select('preferences').eq('side', 'trustpilot').order('updated_at', { ascending: false }).limit(1).single();
-    if (data) return JSON.parse(data.preferences || '[]');
-  } catch (e) {}
+    const { data } = await sb.from('style_preferences')
+      .select('preference_text')
+      .eq('side', 'trustpilot')
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(10);
+    return data ? data.map(r => r.preference_text) : [];
+  } catch (e) { console.error('getStyleProfile error:', e.message); }
   return [];
+}
+
+async function saveStylePreference(userId, side, source, preferenceText, approvedBy = null) {
+  try {
+    await sb.from('style_preferences').insert({
+      user_id: userId, side, source,
+      preference_text: preferenceText,
+      status: 'active',
+      created_at: new Date().toISOString(),
+      approved_by: approvedBy
+    });
+  } catch (e) { console.error('saveStylePreference error:', e.message); }
 }
 
 async function getOverridePatterns() {
@@ -198,23 +215,15 @@ async function savePositiveSignal(userEmail, isAdmin, session, draft) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 100, messages: [{ role: 'user', content: `This Trustpilot response was approved as good:\n"${draft.substring(0, 300)}"\n\nIn one short sentence describe the style pattern. Start with "Prefers:"` }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 200, messages: [{ role: 'user', content: `This Trustpilot response was approved as good:\n"${draft}"\n\nIn one concise sentence describe the writing style and tone. Start with "Prefers:"` }] })
     });
     const data = await res.json();
-    const pattern = data.content?.[0]?.text || `Approved: "${draft.substring(0, 80)}..."`;
+    const pattern = data.content?.[0]?.text || `Prefers: "${draft.substring(0, 200)}..."`;
 
     if (isAdmin) {
-      // Admin signals go directly to style_profiles
-      const { data: existing } = await sb.from('style_profiles').select('id, preferences').eq('side', 'trustpilot').single();
-      const prefs = existing ? JSON.parse(existing.preferences || '[]') : [];
-      prefs.push(pattern);
-      if (prefs.length > 20) prefs.splice(0, prefs.length - 20);
-      if (existing) {
-        await sb.from('style_profiles').update({ preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' }).eq('id', existing.id);
-      } else {
-        await sb.from('style_profiles').insert({ side: 'trustpilot', preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' });
-      }
-      console.log(`✅ Admin positive signal saved to style_profiles`);
+      // Admin signals go directly to style_preferences as their own row
+      await saveStylePreference(null, 'trustpilot', 'slack', pattern, 'admin');
+      console.log(`✅ Admin positive signal saved to style_preferences`);
     } else {
       // Non-admin goes to pending_edits
       await sb.from('pending_edits').insert({
@@ -300,21 +309,13 @@ async function handleEditReply(userEmail, isAdmin, messageText, threadTs) {
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 150, messages: [{ role: 'user', content: `Original draft:\n"${originalDraft.substring(0, 200)}"\n\nEdited version:\n"${editedDraft.substring(0, 200)}"\n\nIn one short sentence describe what changed and why. Start with "Prefers:"` }] })
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 200, messages: [{ role: 'user', content: `Original draft:\n"${originalDraft}"\n\nEdited version:\n"${editedDraft}"\n\nIn one concise sentence describe what changed stylistically and why. Start with "Prefers:"` }] })
       });
       const data = await res.json();
-      const pattern = data.content?.[0]?.text || `Prefers: "${editedDraft.substring(0, 80)}..."`;
+      const pattern = data.content?.[0]?.text || `Prefers: "${editedDraft.substring(0, 200)}..."`;
 
-      // Save to style_profiles
-      const { data: existing } = await sb.from('style_profiles').select('id, preferences').eq('side', 'trustpilot').single();
-      const prefs = existing ? JSON.parse(existing.preferences || '[]') : [];
-      prefs.push(pattern);
-      if (prefs.length > 20) prefs.splice(0, prefs.length - 20);
-      if (existing) {
-        await sb.from('style_profiles').update({ preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' }).eq('id', existing.id);
-      } else {
-        await sb.from('style_profiles').insert({ side: 'trustpilot', preferences: JSON.stringify(prefs), updated_at: new Date().toISOString(), source: 'slack' });
-      }
+      // Save to style_preferences as its own row
+      await saveStylePreference(null, 'trustpilot', 'slack', pattern, 'admin');
 
       // Log to edit_logs
       await sb.from('edit_logs').insert({
