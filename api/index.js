@@ -383,11 +383,19 @@ module.exports = async (req, res) => {
 
     // ── NEW REVIEW MESSAGE ──────────────────────────────────────────
     if (event.type === 'message' && event.channel === TP_CHANNEL) {
-      console.log(`Message: subtype=${event.subtype} bot=${event.bot_profile?.name} thread=${event.thread_ts} ts=${event.ts}`);
-      // Immediately ignore any bot messages (our own drafts fire message events)
-      if (event.bot_id || event.subtype === 'bot_message') { res.status(200).end(); return; }
-      if (event.subtype) { res.status(200).end(); return; }
-      if (event.bot_profile?.name?.toLowerCase().includes('cuddly')) {
+      console.log(`Message: subtype=${event.subtype} bot=${event.bot_profile?.name} username=${event.username} thread=${event.thread_ts} ts=${event.ts}`);
+      // Only ignore OUR OWN bot's messages — allow other bots (like Trustpilot) through
+      const isOwnBot = event.bot_profile?.name?.toLowerCase().includes('cuddly') ||
+                        event.username?.toLowerCase().includes('cuddly');
+      if (isOwnBot) {
+        console.log('Skipping — own bot message');
+        res.status(200).end(); return;
+      }
+      // Allow bot_message subtype through (Trustpilot posts this way) but skip
+      // other non-review subtypes like message_changed, message_deleted, channel_join etc
+      const allowedSubtypes = [undefined, 'bot_message'];
+      if (!allowedSubtypes.includes(event.subtype)) {
+        console.log(`Skipping — subtype not allowed: ${event.subtype}`);
         res.status(200).end(); return;
       }
       if (event.thread_ts && event.thread_ts !== event.ts) {
@@ -477,18 +485,22 @@ module.exports = async (req, res) => {
         console.log(`Session found: ${!!session} reviewTs: ${reviewTs}`);
 
         if (emoji === APPROVE_EMOJI) {
-          const draft = draftMsg?.text?.split('---')?.[1]?.trim() || session?.draft_posted || '';
-          await savePositiveSignal(userEmail, isAdmin, session, draft);
-          if (isAdmin) {
-            await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: event.item.ts, text: '✅ Great — learned from this draft!' });
+          // Extract draft text — try splitting on ---, fall back to session, then full message
+          let draft = draftMsg?.text?.split('---')?.[1]?.trim() || session?.draft_posted || draftMsg?.text || '';
+          console.log(`Approve — draft extracted (${draft.length} chars): "${draft.substring(0,80)}"`);
+          if (!draft) {
+            console.error('Approve signal: no draft text found, skipping save');
+          } else {
+            await savePositiveSignal(userEmail, isAdmin, session, draft);
+            console.log(`Positive signal saved for ${isAdmin ? 'admin' : 'non-admin'}`);
           }
+          await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: reviewTs, text: isAdmin ? '✅ Great — learned from this draft!' : '📋 Thanks! Submitted for admin review.' });
         } else if (emoji === REJECT_EMOJI) {
           await saveNegativeSignal(userEmail, isAdmin, session);
-          if (isAdmin) {
-            await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: event.item.ts, text: '👎 Noted — I\'ll avoid this macro for similar reviews.' });
-          }
+          console.log(`Negative signal saved for ${isAdmin ? 'admin' : 'non-admin'}`);
+          await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: reviewTs, text: isAdmin ? '👎 Noted — I will avoid this macro for similar reviews.' : '📋 Thanks! Submitted for admin review.' });
         } else if (emoji === EDIT_EMOJI) {
-          await handleEditSignal(null, userEmail, isAdmin, session, event.item.channel, event.item.ts);
+          await handleEditSignal(null, userEmail, isAdmin, session, event.item.channel, reviewTs);
         }
         res.status(200).end(); return;
       }
