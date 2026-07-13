@@ -240,25 +240,33 @@ async function savePositiveSignal(userEmail, isAdmin, session, draft) {
 }
 
 // ── ML: SAVE NEGATIVE SIGNAL ──────────────────────────────────────────
-async function saveNegativeSignal(userEmail, isAdmin, session) {
+async function saveNegativeSignal(userEmail, isAdmin, session, draftText) {
   try {
+    const macroUsed = session?.macro_used || 'unknown';
+    const reviewSnippet = session?.review_text?.substring(0, 300) || '';
     const entry = {
       user_id: null, side: 'trustpilot', source: 'slack',
-      email_snippet: session?.review_text?.substring(0, 300) || '',
-      ai_macro: session?.macro_used || '',
-      chosen_macro: `[thumbsdown: ${session?.macro_used || 'unknown'}]`,
+      email_snippet: reviewSnippet,
+      ai_macro: macroUsed,
+      chosen_macro: `[thumbsdown: ${macroUsed}]`,
       created_at: new Date().toISOString()
     };
     if (isAdmin) {
       await sb.from('override_patterns').insert({ ...entry, source: 'slack' });
-      console.log(`✅ Admin negative signal saved to override_patterns`);
+      // Also save a human-readable negative signal to style_preferences
+      await sb.from('style_preferences').insert({
+        user_id: null, side: 'trustpilot', source: 'slack',
+        preference_text: `Negative signal: avoid macro "${macroUsed}"${reviewSnippet ? ` for reviews like: "${reviewSnippet.substring(0, 80)}..."` : ''}`,
+        status: 'active', created_at: new Date().toISOString(), approved_by: 'admin'
+      });
+      console.log(`✅ Admin negative signal saved to override_patterns + style_preferences`);
     } else {
       await sb.from('pending_edits').insert({
         user_email: userEmail, side: 'trustpilot', source: 'slack',
-        original_draft: session?.draft_posted || '',
-        suggested_edit: `[thumbsdown: wrong macro - ${session?.macro_used}]`,
-        macro_title: session?.macro_used || '',
-        review_snippet: session?.review_text?.substring(0, 200) || '',
+        original_draft: session?.draft_posted || draftText || '',
+        suggested_edit: `[thumbsdown: wrong macro - ${macroUsed}]`,
+        macro_title: macroUsed,
+        review_snippet: reviewSnippet.substring(0, 200),
         status: 'pending', created_at: new Date().toISOString()
       });
       console.log(`📋 Non-admin negative signal saved to pending_edits`);
@@ -496,7 +504,8 @@ module.exports = async (req, res) => {
           }
           await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: reviewTs, text: isAdmin ? '✅ Great — learned from this draft!' : '📋 Thanks! Submitted for admin review.' });
         } else if (emoji === REJECT_EMOJI) {
-          await saveNegativeSignal(userEmail, isAdmin, session);
+          const draft = draftMsg?.text?.split('---')?.[1]?.trim() || session?.draft_posted || draftMsg?.text || '';
+          await saveNegativeSignal(userEmail, isAdmin, session, draft);
           console.log(`Negative signal saved for ${isAdmin ? 'admin' : 'non-admin'}`);
           await slackPost('chat.postMessage', { channel: event.item.channel, thread_ts: reviewTs, text: isAdmin ? '👎 Noted — I will avoid this macro for similar reviews.' : '📋 Thanks! Submitted for admin review.' });
         } else if (emoji === EDIT_EMOJI) {
