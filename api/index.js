@@ -116,6 +116,28 @@ async function getOverridePatterns() {
 }
 
 // ── PARSE REVIEW ──────────────────────────────────────────────────────
+function extractStarsFromMessage(msg) {
+  // Try plain text first
+  const textMatch = (msg.text || '').match(/[★✭⭐]+/);
+  if (textMatch) return textMatch[0].replace(/[^★✭⭐]/g, '').length;
+
+  // Try attachments — Trustpilot puts stars in footer, title, or fallback
+  if (msg.attachments) {
+    for (const att of msg.attachments) {
+      const sources = [att.footer, att.title, att.fallback, att.text, att.pretext];
+      for (const s of sources) {
+        if (!s) continue;
+        const m = s.match(/[★✭⭐]+/);
+        if (m) return m[0].replace(/[^★✭⭐]/g, '').length;
+      }
+      // Also check for numeric star rating patterns like "5/5" or "5 stars"
+      const numMatch = JSON.stringify(att).match(/"rating"\s*:\s*(\d)/);
+      if (numMatch) return parseInt(numMatch[1]);
+    }
+  }
+  return 0;
+}
+
 function extractMessageText(msg) {
   if (msg.text && msg.text.trim().length > 10) return msg.text;
   if (msg.attachments && msg.attachments.length > 0) {
@@ -410,12 +432,15 @@ function formatDetectionBar(stars, tone, macroTitle) {
 }
 
 // ── PROCESS REVIEW ────────────────────────────────────────────────────
-async function processReview(channelId, messageTs, rawText) {
+async function processReview(channelId, messageTs, rawText, rawEvent) {
   console.log(`Processing: ts=${messageTs} text="${rawText.substring(0,50)}"`);
   const hasStars = /[★✭⭐]/.test(rawText);
   const hasVerified = /verified/i.test(rawText);
   if (!hasStars && !hasVerified && rawText.length < 20) { console.log('Skipping — not TP review'); return; }
-  const { stars, reviewText } = parseSlackReview(rawText);
+  const { reviewText } = parseSlackReview(rawText);
+  // Extract stars from raw event object directly — more reliable than parsing extracted text
+  const stars = rawEvent ? extractStarsFromMessage(rawEvent) : parseSlackReview(rawText).stars;
+  console.log(`Stars extracted: ${stars} reviewText: "${reviewText.substring(0,50)}"`);
   const [macros, styleProfile, overridePatterns, tone] = await Promise.all([getMacros(), getStyleProfile(), getOverridePatterns(), detectTone(reviewText, stars)]);
   if (!macros.length) { console.error('No macros loaded'); return; }
   const macro = selectMacro(macros, tone);
@@ -480,7 +505,7 @@ module.exports = async (req, res) => {
       try {
         const eventText = extractMessageText(event);
         console.log(`New review text: "${eventText.substring(0,80)}"`);
-        await processReview(event.channel, event.ts, eventText);
+        await processReview(event.channel, event.ts, eventText, event);
       } catch(e) { console.error('Process review error:', e.message); }
       res.status(200).end(); return;
     }
@@ -496,7 +521,7 @@ module.exports = async (req, res) => {
         const result = await slackPost('conversations.history', { channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true });
         const msg = result.messages?.[0];
         if (!msg || msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { res.status(200).end(); return; }
-        await processReview(event.item.channel, event.item.ts, extractMessageText(msg));
+        await processReview(event.item.channel, event.item.ts, extractMessageText(msg), msg);
         res.status(200).end(); return;
       }
 
