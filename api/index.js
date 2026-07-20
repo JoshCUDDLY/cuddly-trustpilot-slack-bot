@@ -61,15 +61,42 @@ async function getStyleProfile() {
       .select('preference_text')
       .eq('side', 'trustpilot')
       .eq('status', 'active')
+      // Only pull real style patterns — skip raw response text stored as preferences
+      .not('preference_text', 'ilike', 'Prefers: \"%')
       .order('created_at', { ascending: false })
-      .limit(10);
-    return data ? data.map(r => r.preference_text) : [];
+      .limit(5);
+    if (!data || data.length === 0) return [];
+    // Deduplicate — keep only unique patterns
+    const seen = new Set();
+    return data
+      .map(r => r.preference_text)
+      .filter(p => {
+        const key = p.substring(0, 60).toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key); return true;
+      });
   } catch (e) { console.error('getStyleProfile error:', e.message); }
   return [];
 }
 
 async function saveStylePreference(userId, side, source, preferenceText, approvedBy = null) {
   try {
+    // Don't save raw response text as a preference — must be a real extracted pattern
+    if (preferenceText.startsWith('Prefers: \"') || preferenceText.length > 300) {
+      console.log('Skipping — preference is raw response text, not an extracted pattern');
+      return;
+    }
+    // Deduplicate — check if very similar preference already exists
+    const { data: existing } = await sb.from('style_preferences')
+      .select('id')
+      .eq('side', side)
+      .eq('status', 'active')
+      .ilike('preference_text', preferenceText.substring(0, 40) + '%')
+      .limit(1);
+    if (existing && existing.length > 0) {
+      console.log('Skipping — similar preference already exists');
+      return;
+    }
     await sb.from('style_preferences').insert({
       user_id: userId, side, source,
       preference_text: preferenceText,
@@ -77,6 +104,7 @@ async function saveStylePreference(userId, side, source, preferenceText, approve
       created_at: new Date().toISOString(),
       approved_by: approvedBy
     });
+    console.log(`Saved preference: "${preferenceText.substring(0, 80)}"`);
   } catch (e) { console.error('saveStylePreference error:', e.message); }
 }
 
@@ -158,9 +186,31 @@ function selectMacro(macros, tone) {
 
 // ── DRAFT GENERATION ──────────────────────────────────────────────────
 async function generateDraft(reviewText, stars, tone, macro, styleProfile, overridePatterns) {
-  const styleNote = styleProfile.length > 0 ? `\n\nStyle notes:\n${styleProfile.slice(-4).join('\n')}` : '';
-  const patternNote = overridePatterns.length > 0 ? `\n\nOverride history:\n${overridePatterns.map(p => `• "${p.email_snippet?.substring(0, 60)}..." → ${p.chosen_macro}`).join('\n')}` : '';
-  const prompt = `You are a Trustpilot review response writer for CUDDLY, an animal welfare platform.\n\nThe customer left this ${stars ? stars + '-star' : ''} review:\n---\n${reviewText}\n---\n\nTone: ${tone}\n\nBase response:\n---\n${macro.response}\n---\n\nKeep the same meaning and tone but rephrase naturally so it feels handwritten, not templated. Do not imply CUDDLY directly helps animals.${styleNote}${patternNote}\n\nReturn ONLY the final reply text.`;
+  const styleNote = styleProfile.length > 0 ? `\n\nStyle preferences to apply subtly:\n${styleProfile.join('\n')}` : '';
+  const patternNote = overridePatterns.length > 0 ? `\n\nMacro avoidance signals:\n${overridePatterns.map(p => `• "${p.email_snippet?.substring(0, 60)}..." → avoid: ${p.chosen_macro}`).join('\n')}` : '';
+  const prompt = `You are a Trustpilot review response writer for CUDDLY, an animal welfare platform.
+
+The customer left this ${stars ? stars + '-star' : ''} review:
+---
+${reviewText}
+---
+
+Use this base response as your template:
+---
+${macro.response}
+---
+
+CRITICAL RULES — you must follow these exactly:
+- Stay extremely close to the base response wording. Do NOT rewrite it.
+- Only make minimal natural variations in phrasing — swap a word or two at most.
+- Do NOT add new sentences, new ideas, or content not in the base response.
+- Do NOT use em dashes (—), semicolons, or formal punctuation not in the original.
+- Do NOT add AI-style flourishes or elevated vocabulary.
+- Keep the exact same length and structure as the base response.
+- Do not imply CUDDLY directly helps animals — we connect donors with rescues.
+- Tone: ${tone}${styleNote}${patternNote}
+
+Return ONLY the final reply text. Nothing else.`;
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -175,13 +225,18 @@ async function generateDraft(reviewText, stars, tone, macro, styleProfile, overr
 // ── LOG SESSION ───────────────────────────────────────────────────────
 async function logSession(ts, channel, reviewText, stars, tone, macroTitle, draft) {
   try {
-    await sb.from('bot_sessions').upsert({
+    const { error } = await sb.from('bot_sessions').upsert({
       slack_message_ts: ts, slack_channel: channel,
-      review_text: reviewText.substring(0, 500), stars, tone,
+      review_text: reviewText.substring(0, 500), stars: stars || 0, tone,
       macro_used: macroTitle, draft_posted: draft.substring(0, 1000),
       created_at: new Date().toISOString()
     }, { onConflict: 'slack_message_ts' });
-  } catch (e) { console.error('Session log error:', e.message); }
+    if (error) {
+      console.error(`Session log error: ${error.message} code: ${error.code} details: ${error.details}`);
+    } else {
+      console.log(`✅ Session logged: ts=${ts} macro=${macroTitle}`);
+    }
+  } catch (e) { console.error('Session log exception:', e.message); }
 }
 
 // ── ML: FIND DRAFT MESSAGE IN THREAD ─────────────────────────────────
