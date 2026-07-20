@@ -181,7 +181,7 @@ async function detectTone(reviewText, stars) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 60, messages: [{ role: 'user', content: `Classify this Trustpilot review. Stars: ${stars || 'unknown'}. Review: "${reviewText}"\n\nRespond with ONLY one word: positive, negative, mixed, concern_pricing, concern_tax, concern_email, concern_platform, concern_updates` }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 60, messages: [{ role: 'user', content: `Classify this Trustpilot review's PRIMARY concern or tone. Stars: ${stars || 'unknown'}. Review: "${reviewText}"\n\nIf the review is mostly positive but mentions a question, concern, or issue — classify by the concern type, not the overall positivity.\n\nRespond with ONLY one word: positive, negative, mixed, concern_pricing, concern_tax, concern_email, concern_platform, concern_updates` }] })
     });
     const data = await res.json();
     tone = (data.content?.[0]?.text || 'positive').trim().toLowerCase().replace(/[^a-z_]/g, '');
@@ -190,15 +190,19 @@ async function detectTone(reviewText, stars) {
   }
 
   // Hard override based on star rating — stars never lie
-  // If AI says positive but stars are 1-2, override to negative
-  // If AI says negative but stars are 4-5, override to positive
-  if (stars >= 4 && (tone === 'negative' || tone === 'mixed')) {
+  // Only override clear mismatches — don't override mixed/concern classifications
+  const isConcern = ['mixed', 'concern_pricing', 'concern_tax', 'concern_email', 'concern_platform', 'concern_updates'].includes(tone);
+  if (stars >= 4 && tone === 'negative') {
     console.log(`Tone override: AI said ${tone} but stars=${stars} → positive`);
     tone = 'positive';
-  } else if (stars > 0 && stars <= 2 && (tone === 'positive' || tone === 'mixed')) {
+  } else if (stars > 0 && stars <= 2 && tone === 'positive') {
     console.log(`Tone override: AI said ${tone} but stars=${stars} → negative`);
     tone = 'negative';
-  } else if (stars === 0) {
+  } else if (stars > 0 && stars <= 2 && tone === 'mixed') {
+    console.log(`Tone override: AI said mixed but stars=${stars} → negative`);
+    tone = 'negative';
+  }
+  // Never override mixed/concern tones — those are correct even on 4-5 star reviews
     // No stars — trust the AI but fall back to text-based detection
     if (!tone || tone === 'positive') {
       const upperRatio = (reviewText.match(/[A-Z]/g) || []).length / reviewText.length;
