@@ -225,12 +225,12 @@ Return ONLY the final reply text. Nothing else.`;
 // ── LOG SESSION ───────────────────────────────────────────────────────
 async function logSession(ts, channel, reviewText, stars, tone, macroTitle, draft) {
   try {
-    const { error } = await sb.from('bot_sessions').upsert({
+    const { error } = await sb.from('bot_sessions').insert({
       slack_message_ts: ts, slack_channel: channel,
       review_text: reviewText.substring(0, 500), stars: stars || 0, tone,
       macro_used: macroTitle, draft_posted: draft.substring(0, 1000),
       created_at: new Date().toISOString()
-    }, { onConflict: 'slack_message_ts' });
+    });
     if (error) {
       console.error(`Session log error: ${error.message} code: ${error.code} details: ${error.details}`);
     } else {
@@ -421,13 +421,14 @@ async function processReview(channelId, messageTs, rawText) {
   const macro = selectMacro(macros, tone);
   const draft = await generateDraft(reviewText, stars, tone, macro, styleProfile, overridePatterns);
   const detectionBar = formatDetectionBar(stars, tone, macro.title);
+  // Log session BEFORE posting — Vercel may terminate after res.end() fires
+  await logSession(messageTs, channelId, reviewText, stars, tone, macro.title, draft);
   const postResult = await slackPost('chat.postMessage', {
     channel: channelId, thread_ts: messageTs,
     text: `*CUDDLY Response Draft* 🐾\n\n${detectionBar}\n\n---\n\n${draft}\n\n---\n_React to this draft: ✅ good  ·  ✏️ I edited this  ·  👎 wrong macro  ·  🔁 regenerate_`,
     unfurl_links: false
   });
   console.log(`Draft posted: ${postResult?.ok} error: ${postResult?.error}`);
-  await logSession(messageTs, channelId, reviewText, stars, tone, macro.title, draft);
 }
 
 // ── MAIN HANDLER ──────────────────────────────────────────────────────
