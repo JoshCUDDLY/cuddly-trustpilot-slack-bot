@@ -176,6 +176,7 @@ function parseSlackReview(raw) {
 
 // ── TONE DETECTION ────────────────────────────────────────────────────
 async function detectTone(reviewText, stars) {
+  let tone = 'positive';
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -183,10 +184,34 @@ async function detectTone(reviewText, stars) {
       body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 60, messages: [{ role: 'user', content: `Classify this Trustpilot review. Stars: ${stars || 'unknown'}. Review: "${reviewText}"\n\nRespond with ONLY one word: positive, negative, mixed, concern_pricing, concern_tax, concern_email, concern_platform, concern_updates` }] })
     });
     const data = await res.json();
-    return (data.content?.[0]?.text || 'positive').trim().toLowerCase().replace(/[^a-z_]/g, '');
+    tone = (data.content?.[0]?.text || 'positive').trim().toLowerCase().replace(/[^a-z_]/g, '');
   } catch (e) {
-    return stars >= 4 ? 'positive' : stars > 0 && stars <= 2 ? 'negative' : 'mixed';
+    console.error('Tone detection error:', e.message);
   }
+
+  // Hard override based on star rating — stars never lie
+  // If AI says positive but stars are 1-2, override to negative
+  // If AI says negative but stars are 4-5, override to positive
+  if (stars >= 4 && (tone === 'negative' || tone === 'mixed')) {
+    console.log(`Tone override: AI said ${tone} but stars=${stars} → positive`);
+    tone = 'positive';
+  } else if (stars > 0 && stars <= 2 && (tone === 'positive' || tone === 'mixed')) {
+    console.log(`Tone override: AI said ${tone} but stars=${stars} → negative`);
+    tone = 'negative';
+  } else if (stars === 0) {
+    // No stars — trust the AI but fall back to text-based detection
+    if (!tone || tone === 'positive') {
+      const upperRatio = (reviewText.match(/[A-Z]/g) || []).length / reviewText.length;
+      const negativeWords = /terrible|awful|horrible|worst|scam|fraud|never|problem|issue|wrong|bad|poor|disappointed|angry/i.test(reviewText);
+      if (upperRatio > 0.5 || negativeWords) {
+        console.log(`Tone override: text signals negative (upperRatio=${upperRatio.toFixed(2)} negWords=${negativeWords})`);
+        tone = 'negative';
+      }
+    }
+  }
+
+  console.log(`Final tone: ${tone} (stars: ${stars})`);
+  return tone;
 }
 
 // ── MACRO SELECTION ───────────────────────────────────────────────────
