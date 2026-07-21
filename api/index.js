@@ -201,15 +201,28 @@ async function detectTone(reviewText, stars) {
   } else if (stars > 0 && stars <= 2 && tone === 'mixed') {
     console.log(`Tone override: AI said mixed but stars=${stars} → negative`);
     tone = 'negative';
+  } else if (stars === 3 && tone === 'positive') {
+    // 3 stars is never purely positive — always at least mixed
+    console.log(`Tone override: AI said positive but stars=3 → mixed`);
+    tone = 'mixed';
   }
 
   // For reviews with no stars — use text signals as fallback
   if (stars === 0 && tone === 'positive') {
     const upperRatio = (reviewText.match(/[A-Z]/g) || []).length / reviewText.length;
-    const negativeWords = /terrible|awful|horrible|worst|scam|fraud|never|problem|issue|wrong|bad|poor|disappointed|angry/i.test(reviewText);
+    const negativeWords = /terrible|awful|horrible|worst|scam|fraud|never|problem|issue|wrong|bad|poor|disappointed|angry|impossible|frustrat|broken|doesn't work|not working|can't|cannot|failed|error|bug|glitch|slow|crash/i.test(reviewText);
     if (upperRatio > 0.5 || negativeWords) {
       console.log(`Tone override: text signals negative (upperRatio=${upperRatio.toFixed(2)} negWords=${negativeWords})`);
       tone = 'negative';
+    }
+  }
+
+  // Additional check — strong complaint keywords override positive classification
+  if (tone === 'positive' && stars <= 4) {
+    const strongNegative = /impossible|frustrat|broken|doesn't work|not working|can't donate|cannot donate|failed|won't load|won't work|stop dealing|old problem|repeating/i.test(reviewText);
+    if (strongNegative) {
+      console.log(`Tone override: strong negative keywords detected → mixed`);
+      tone = stars <= 2 ? 'negative' : 'mixed';
     }
   }
 
