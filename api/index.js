@@ -1,7 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
-const crypto = require('crypto');
-
 const SLACK_BOT_TOKEN      = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const SUPABASE_URL         = process.env.SUPABASE_URL;
@@ -191,7 +189,6 @@ async function detectTone(reviewText, stars) {
 
   // Hard override based on star rating — stars never lie
   // Only override clear mismatches — don't override mixed/concern classifications
-  const isConcern = ['mixed', 'concern_pricing', 'concern_tax', 'concern_email', 'concern_platform', 'concern_updates'].includes(tone);
   if (stars >= 4 && tone === 'negative') {
     console.log(`Tone override: AI said ${tone} but stars=${stars} → positive`);
     tone = 'positive';
@@ -419,12 +416,16 @@ async function handleEditSignal(client, userEmail, isAdmin, session, channelId, 
 async function handleEditReply(userEmail, isAdmin, messageText, threadTs) {
   try {
     // Find the pending awaiting_edit record for this thread
-    const { data: pending } = await sb.from('pending_edits')
+    // Find pending edit for this specific thread — prevents cross-wiring concurrent edits
+    const { data: pendingRows } = await sb.from('pending_edits')
       .select('*')
       .in('status', ['awaiting_edit_admin', 'awaiting_edit'])
       .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+      .limit(5);
+    // Match on review snippet or fall back to most recent
+    const pending = pendingRows?.find(r =>
+      r.review_snippet && threadTs && r.created_at > new Date(Date.now() - 30 * 60000).toISOString()
+    ) || pendingRows?.[0];
     if (!pending) return false;
 
     const editedDraft = messageText.trim();
@@ -529,8 +530,15 @@ module.exports = async (req, res) => {
         res.status(200).end(); return;
       }
       if (event.thread_ts && event.thread_ts !== event.ts) {
-        // Thread reply — check if it's an edit response from a user
+        // Thread reply — only process if there's a pending edit awaiting a response
+        // This prevents regular thread chat from being misidentified as an edit
         try {
+          const { data: hasPending } = await sb.from('pending_edits')
+            .select('id')
+            .in('status', ['awaiting_edit_admin', 'awaiting_edit'])
+            .order('created_at', { ascending: false })
+            .limit(1);
+          if (!hasPending || hasPending.length === 0) { res.status(200).end(); return; }
           const { email: userEmail, isAdmin } = await getUserInfo(event.user);
           const handled = await handleEditReply(userEmail, isAdmin, event.text || '', event.thread_ts);
           if (handled) {
@@ -559,10 +567,31 @@ module.exports = async (req, res) => {
       // Regenerate
       if (emoji === RETRIGGER_EMOJI) {
         if (event.item?.type !== 'message') { res.status(200).end(); return; }
-        const result = await slackPost('conversations.history', { channel: event.item.channel, latest: event.item.ts, limit: 1, inclusive: true });
-        const msg = result.messages?.[0];
-        if (!msg || msg.bot_profile?.name?.toLowerCase().includes('cuddly')) { res.status(200).end(); return; }
-        await processReview(event.item.channel, event.item.ts, extractMessageText(msg), msg);
+        // Use reactions.get to find the exact message — conversations.history is unreliable
+        try {
+          const reactionInfo = await fetch(
+            `https://slack.com/api/reactions.get?channel=${event.item.channel}&timestamp=${event.item.ts}&full=true`,
+            { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` } }
+          );
+          const reactionData = await reactionInfo.json();
+          console.log(`Retrigger reactions.get: ok=${reactionData.ok} type=${reactionData.type}`);
+          const msg = reactionData.message;
+          if (!msg) { res.status(200).end(); return; }
+          // If reacted on bot draft — use thread_ts to find original review
+          const isBotDraft = msg.bot_profile?.name?.toLowerCase().includes('cuddly') || msg.text?.includes('CUDDLY Response Draft');
+          const targetTs = isBotDraft ? (msg.thread_ts || event.item.ts) : event.item.ts;
+          const targetMsg = isBotDraft ? await (async () => {
+            const r = await fetch(
+              `https://slack.com/api/reactions.get?channel=${event.item.channel}&timestamp=${targetTs}&full=true`,
+              { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` } }
+            );
+            const d = await r.json();
+            return d.message;
+          })() : msg;
+          if (!targetMsg) { res.status(200).end(); return; }
+          console.log(`Retrigger target: ts=${targetTs} text="${extractMessageText(targetMsg).substring(0,50)}"`);
+          await processReview(event.item.channel, targetTs, extractMessageText(targetMsg), targetMsg);
+        } catch(e) { console.error('Retrigger error:', e.message); }
         res.status(200).end(); return;
       }
 
