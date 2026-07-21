@@ -202,15 +202,14 @@ async function detectTone(reviewText, stars) {
     console.log(`Tone override: AI said mixed but stars=${stars} → negative`);
     tone = 'negative';
   }
-  // Never override mixed/concern tones — those are correct even on 4-5 star reviews
-    // No stars — trust the AI but fall back to text-based detection
-    if (!tone || tone === 'positive') {
-      const upperRatio = (reviewText.match(/[A-Z]/g) || []).length / reviewText.length;
-      const negativeWords = /terrible|awful|horrible|worst|scam|fraud|never|problem|issue|wrong|bad|poor|disappointed|angry/i.test(reviewText);
-      if (upperRatio > 0.5 || negativeWords) {
-        console.log(`Tone override: text signals negative (upperRatio=${upperRatio.toFixed(2)} negWords=${negativeWords})`);
-        tone = 'negative';
-      }
+
+  // For reviews with no stars — use text signals as fallback
+  if (stars === 0 && tone === 'positive') {
+    const upperRatio = (reviewText.match(/[A-Z]/g) || []).length / reviewText.length;
+    const negativeWords = /terrible|awful|horrible|worst|scam|fraud|never|problem|issue|wrong|bad|poor|disappointed|angry/i.test(reviewText);
+    if (upperRatio > 0.5 || negativeWords) {
+      console.log(`Tone override: text signals negative (upperRatio=${upperRatio.toFixed(2)} negWords=${negativeWords})`);
+      tone = 'negative';
     }
   }
 
