@@ -16,7 +16,6 @@ const REJECT_EMOJI     = 'thumbsdown';         // 👎 wrong macro/tone — :thu
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-let tpUsedResponses = [];
 let cachedMacros = [];
 let macroLoadedAt = null;
 
@@ -113,6 +112,20 @@ async function getOverridePatterns() {
   } catch (e) { return []; }
 }
 
+// ── ROTATION TRACKING (Supabase-backed) ─────────────────────────────
+async function getRecentlyUsedMacros() {
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // last 24 hours
+    const { data } = await sb.from('bot_sessions')
+      .select('macro_used')
+      .eq('slack_channel', process.env.TP_CHANNEL_ID)
+      .gte('created_at', cutoff)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    return data ? [...new Set(data.map(r => r.macro_used))] : [];
+  } catch (e) { return []; }
+}
+
 // ── PARSE REVIEW ──────────────────────────────────────────────────────
 function extractStarsFromMessage(msg) {
   // Try plain text first
@@ -179,7 +192,7 @@ async function detectTone(reviewText, stars) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 60, messages: [{ role: 'user', content: `Classify this Trustpilot review's PRIMARY concern or tone. Stars: ${stars || 'unknown'}. Review: "${reviewText}"\n\nIf the review is mostly positive but mentions a question, concern, or issue — classify by the concern type, not the overall positivity.\n\nRespond with ONLY one word: positive, negative, mixed, concern_pricing, concern_tax, concern_email, concern_platform, concern_updates` }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 60, messages: [{ role: 'user', content: `Classify this Trustpilot review. Stars: ${stars || 'unknown'}. Review: "${reviewText}"\n\nRULES:\n- If ANY concern, question, complaint or issue is mentioned — even in an otherwise positive review — classify by that concern\n- "I look for updates" or "wish I got updates" = concern_updates\n- "more expensive" or "price" or "cost" = concern_pricing\n- "trouble donating" or "website issue" or "couldn't" = concern_platform\n- "too many emails" or "unsubscribe" = concern_email\n- "charged" or "tax" = concern_tax\n- Purely positive with NO concerns = positive\n- Mostly negative = negative\n- Mixed feelings without specific concern = mixed\n\nRespond with ONLY one word: positive, negative, mixed, concern_pricing, concern_tax, concern_email, concern_platform, concern_updates` }] })
     });
     const data = await res.json();
     tone = (data.content?.[0]?.text || 'positive').trim().toLowerCase().replace(/[^a-z_]/g, '');
@@ -228,19 +241,37 @@ async function detectTone(reviewText, stars) {
 }
 
 // ── MACRO SELECTION ───────────────────────────────────────────────────
-function selectMacro(macros, tone) {
+async function selectMacro(macros, tone) {
   const positivePool = macros.filter(m => m.title.includes('5 Star') || m.title.includes('Thank You') || m.title.includes('Support') || m.title.includes('Community') || m.title.includes('Platform v') || m.title.includes('Warm') || m.title.includes('Rescue') || m.title.includes('Brief'));
-  const concernMap = { concern_pricing: macros.find(m => m.title.includes('Platform / Mission')), concern_tax: macros.find(m => m.title.includes('Sales Tax')), concern_email: macros.find(m => m.title.includes('Unsubscribe')), concern_platform: macros.find(m => m.title.includes('Platform / Mission')), concern_updates: macros.find(m => m.title.includes('Updates')) };
-  const negativePool = macros.filter(m => !m.title.includes('5 Star') && !m.title.includes('Thank You') && !m.title.includes('Support') && !m.title.includes('Community') && !m.title.includes('Warm') && !m.title.includes('Rescue') && !m.title.includes('Brief'));
-  let pool;
+  const concernMap = {
+    concern_pricing:  macros.find(m => m.title.includes('Platform / Mission')),
+    concern_tax:      macros.find(m => m.title.includes('Sales Tax')),
+    concern_email:    macros.find(m => m.title.includes('Unsubscribe')),
+    concern_platform: macros.find(m => m.title.includes('Platform / Mission')),
+    concern_updates:  macros.find(m => m.title.includes('Updates'))
+  };
+  const negativePool = macros.filter(m =>
+    !m.title.includes('5 Star') && !m.title.includes('Thank You') &&
+    !m.title.includes('Support') && !m.title.includes('Community') &&
+    !m.title.includes('Warm') && !m.title.includes('Rescue') && !m.title.includes('Brief')
+  );
+
+  // Return specific concern macro immediately
   if (concernMap[tone]) return concernMap[tone];
-  else if (tone === 'negative' || tone === 'mixed') pool = negativePool.length > 0 ? negativePool : macros;
+
+  // Select pool based on tone
+  let pool;
+  if (tone === 'negative' || tone === 'mixed') pool = negativePool.length > 0 ? negativePool : macros;
   else pool = positivePool.length > 0 ? positivePool : macros;
-  const unused = pool.filter(m => !tpUsedResponses.includes(m.title));
+
+  // Use Supabase-backed rotation — persists across cold starts
+  const recentlyUsed = await getRecentlyUsedMacros();
+  console.log(`Recently used macros (24h): ${recentlyUsed.length} — ${recentlyUsed.slice(0,3).join(', ')}...`);
+
+  const unused = pool.filter(m => !recentlyUsed.includes(m.title));
   const rotationPool = unused.length > 0 ? unused : pool;
   const selected = rotationPool[Math.floor(Math.random() * rotationPool.length)];
-  tpUsedResponses.push(selected.title);
-  if (tpUsedResponses.length > macros.length - 1) tpUsedResponses = tpUsedResponses.slice(-Math.floor(macros.length / 2));
+  console.log(`Selected macro: ${selected.title} (from pool of ${rotationPool.length} unused)`);
   return selected;
 }
 
@@ -318,9 +349,29 @@ async function findBotDraftInThread(channelId, threadTs) {
 // ── ML: GET SESSION FOR MESSAGE ───────────────────────────────────────
 async function getSession(messageTs) {
   try {
+    // Try exact match first
     const { data } = await sb.from('bot_sessions').select('*').eq('slack_message_ts', messageTs).single();
-    return data || null;
-  } catch (e) { return null; }
+    if (data) return data;
+  } catch (e) {}
+  try {
+    // Fallback: find session created within 60 seconds of this ts
+    // Handles cases where bot draft ts differs slightly from review ts
+    const tsNum = parseFloat(messageTs);
+    const windowStart = new Date((tsNum - 60) * 1000).toISOString();
+    const windowEnd = new Date((tsNum + 300) * 1000).toISOString();
+    const { data: nearby } = await sb.from('bot_sessions')
+      .select('*')
+      .eq('slack_channel', process.env.TP_CHANNEL_ID)
+      .gte('created_at', windowStart)
+      .lte('created_at', windowEnd)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (nearby && nearby.length > 0) {
+      console.log(`Session found via time window fallback: ts=${nearby[0].slack_message_ts}`);
+      return nearby[0];
+    }
+  } catch (e) { console.error('Session fallback error:', e.message); }
+  return null;
 }
 
 // ── ML: SAVE POSITIVE SIGNAL ──────────────────────────────────────────
@@ -415,6 +466,13 @@ async function handleEditSignal(client, userEmail, isAdmin, session, channelId, 
 // ── ML: HANDLE EDIT REPLY ─────────────────────────────────────────────
 async function handleEditReply(userEmail, isAdmin, messageText, threadTs) {
   try {
+    // Auto-expire stale awaiting_edit records older than 60 minutes
+    const expiryCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await sb.from('pending_edits')
+      .update({ status: 'expired' })
+      .in('status', ['awaiting_edit_admin', 'awaiting_edit'])
+      .lt('created_at', expiryCutoff);
+
     // Find the pending awaiting_edit record for this thread
     // Find pending edit for this specific thread — prevents cross-wiring concurrent edits
     const { data: pendingRows } = await sb.from('pending_edits')
@@ -485,7 +543,7 @@ async function processReview(channelId, messageTs, rawText, rawEvent) {
   console.log(`Stars extracted: ${stars} reviewText: "${reviewText.substring(0,50)}"`);
   const [macros, styleProfile, overridePatterns, tone] = await Promise.all([getMacros(), getStyleProfile(), getOverridePatterns(), detectTone(reviewText, stars)]);
   if (!macros.length) { console.error('No macros loaded'); return; }
-  const macro = selectMacro(macros, tone);
+  const macro = await selectMacro(macros, tone);
   const draft = await generateDraft(reviewText, stars, tone, macro, styleProfile, overridePatterns);
   const detectionBar = formatDetectionBar(stars, tone, macro.title);
   // Log session BEFORE posting — Vercel may terminate after res.end() fires
