@@ -718,7 +718,14 @@ module.exports = async (req, res) => {
     // ── REACTION ADDED ──────────────────────────────────────────────
     if (event.type === 'reaction_added') {
       const emoji = event.reaction;
-      console.log(`Reaction: ${emoji}`);
+      console.log(`Reaction: ${emoji} in channel: ${event.item?.channel}`);
+
+      // Only process ML reactions from the Trustpilot channel
+      // Prevents round robin channel reactions from polluting training data
+      if (event.item?.channel !== TP_CHANNEL) {
+        console.log(`Skipping reaction — not in TP channel (${event.item?.channel})`);
+        res.status(200).end(); return;
+      }
 
       // Regenerate
       if (emoji === RETRIGGER_EMOJI) {
