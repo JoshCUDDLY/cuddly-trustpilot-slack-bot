@@ -6,6 +6,7 @@ const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_KEY         = process.env.SUPABASE_SERVICE_KEY;
 const ANTHROPIC_KEY        = process.env.ANTHROPIC_API_KEY;
 const TP_CHANNEL           = process.env.TP_CHANNEL_ID;
+const BOT_USER_ID          = process.env.BOT_USER_ID; // Add this to Vercel env vars
 const ADMIN_EMAIL          = 'joshua@cuddly.com';
 const ADMIN_SLACK_ID       = 'U06L2KNL17W';
 
@@ -650,15 +651,15 @@ module.exports = async (req, res) => {
     if (!event) { res.status(200).end(); return; }
 
     // ── APP MENTION (@bot) ──────────────────────────────────────────
-    if (event.type === 'app_mention') {
+    if (event.type === 'app_mention' || (event.type === 'message' && event.text && BOT_USER_ID && event.text.includes(`<@${BOT_USER_ID}>`))) {
       const text = (event.text || '').toLowerCase();
       const isRoundRobinTrigger = ROUND_ROBIN_TRIGGER_USERS.includes(event.user) &&
         (text.includes('round robin') || text.includes('roundrobin') || text.includes('rotation') || text.includes('next'));
+      console.log(`Bot mention detected — user: ${event.user} text: "${text.substring(0,60)}" roundRobin: ${isRoundRobinTrigger}`);
       if (isRoundRobinTrigger) {
         console.log(`Round robin triggered by ${event.user} in ${event.channel}`);
         await handleRoundRobin(event);
       } else if (!ROUND_ROBIN_TRIGGER_USERS.includes(event.user)) {
-        // Not an authorized user
         await slackPost('chat.postMessage', {
           channel: event.channel,
           thread_ts: event.ts,
