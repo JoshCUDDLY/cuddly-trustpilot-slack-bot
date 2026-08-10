@@ -14,6 +14,14 @@ const APPROVE_EMOJI    = 'white_check_mark';   // ✅ good draft — :white_chec
 const EDIT_EMOJI       = 'pencil2';            // ✏️ I edited before sending — :pencil2:
 const REJECT_EMOJI     = 'thumbsdown';         // 👎 wrong macro/tone — :thumbsdown:
 
+// ── ROUND ROBIN CONFIG ────────────────────────────────────────────────
+const ROUND_ROBIN_TRIGGER_USERS = [
+  'U06L2KNL17W',  // Josh
+  'U08DMFFUU2K',  // Ceiren
+  'U017B6TN9J4',  // Emily
+];
+const ROUND_ROBIN_LIST_NAME = 'fundraising_consultants';
+
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let cachedMacros = [];
@@ -556,6 +564,77 @@ async function processReview(channelId, messageTs, rawText, rawEvent) {
   console.log(`Draft posted: ${postResult?.ok} error: ${postResult?.error}`);
 }
 
+// ── ROUND ROBIN ───────────────────────────────────────────────────────
+async function getRotation() {
+  try {
+    const { data, error } = await sb
+      .from('rotation_lists')
+      .select('*')
+      .eq('list_name', ROUND_ROBIN_LIST_NAME)
+      .single();
+    if (error) throw error;
+    return data;
+  } catch (e) {
+    console.error('getRotation error:', e.message);
+    return null;
+  }
+}
+
+async function advanceRotation(rotation) {
+  try {
+    const members = Array.isArray(rotation.members)
+      ? rotation.members
+      : rotation.members.split(',').map(m => m.trim());
+    const nextIndex = (rotation.current_index + 1) % members.length;
+    const { error } = await sb
+      .from('rotation_lists')
+      .update({ current_index: nextIndex, updated_at: new Date().toISOString() })
+      .eq('list_name', ROUND_ROBIN_LIST_NAME);
+    if (error) throw error;
+    return nextIndex;
+  } catch (e) {
+    console.error('advanceRotation error:', e.message);
+    return null;
+  }
+}
+
+async function handleRoundRobin(event) {
+  try {
+    const rotation = await getRotation();
+    if (!rotation || !rotation.members || rotation.members.length === 0) {
+      await slackPost('chat.postMessage', {
+        channel: event.channel,
+        thread_ts: event.ts,
+        text: '⚠️ Round robin list not found. Please set up the `fundraising_consultants` rotation in Supabase.'
+      });
+      return;
+    }
+
+    // Support both array and comma-separated string formats
+    const members = Array.isArray(rotation.members)
+      ? rotation.members
+      : rotation.members.split(',').map(m => m.trim());
+
+    const currentUserId = members[rotation.current_index];
+    const replyText = `<@${currentUserId}> — your turn if not someone else!`;
+
+    // Post the @mention
+    await slackPost('chat.postMessage', {
+      channel: event.channel,
+      text: replyText,
+    });
+
+    // Advance to next person
+    const nextIndex = (rotation.current_index + 1) % members.length;
+    await advanceRotation({ ...rotation, members });
+    const nextUserId = members[nextIndex];
+    console.log(`✅ Round robin: assigned <@${currentUserId}>, next up is <@${nextUserId}>`);
+
+  } catch (e) {
+    console.error('handleRoundRobin error:', e.message);
+  }
+}
+
 // ── MAIN HANDLER ──────────────────────────────────────────────────────
 module.exports = async (req, res) => {
   if (req.method === 'GET') { res.status(200).send('CUDDLY Slack bot is running 🐾'); return; }
@@ -569,6 +648,25 @@ module.exports = async (req, res) => {
 
     const event = body.event;
     if (!event) { res.status(200).end(); return; }
+
+    // ── APP MENTION (@bot) ──────────────────────────────────────────
+    if (event.type === 'app_mention') {
+      const text = (event.text || '').toLowerCase();
+      const isRoundRobinTrigger = ROUND_ROBIN_TRIGGER_USERS.includes(event.user) &&
+        (text.includes('round robin') || text.includes('roundrobin') || text.includes('rotation') || text.includes('next'));
+      if (isRoundRobinTrigger) {
+        console.log(`Round robin triggered by ${event.user} in ${event.channel}`);
+        await handleRoundRobin(event);
+      } else if (!ROUND_ROBIN_TRIGGER_USERS.includes(event.user)) {
+        // Not an authorized user
+        await slackPost('chat.postMessage', {
+          channel: event.channel,
+          thread_ts: event.ts,
+          text: `Sorry <@${event.user}>, you're not authorized to trigger the round robin.`
+        });
+      }
+      res.status(200).end(); return;
+    }
 
     // ── NEW REVIEW MESSAGE ──────────────────────────────────────────
     if (event.type === 'message' && event.channel === TP_CHANNEL) {
