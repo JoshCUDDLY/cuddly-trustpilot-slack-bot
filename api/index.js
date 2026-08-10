@@ -619,9 +619,10 @@ async function handleRoundRobin(event) {
     const currentUserId = members[rotation.current_index];
     const replyText = `<@${currentUserId}> — your turn if not someone else!`;
 
-    // Post the @mention
+    // Post the @mention as a reply to the original trigger message
     await slackPost('chat.postMessage', {
       channel: event.channel,
+      thread_ts: event.ts,
       text: replyText,
     });
 
