@@ -19,6 +19,7 @@ const REJECT_EMOJI     = 'thumbsdown';         // 👎 wrong macro/tone — :thu
 const ROUND_ROBIN_TRIGGER_USERS = [
   'U06L2KNL17W',  // Josh
   'U017B6TN9J4',  // Emily
+  'U0C7B819KSR',  // Destyni 
 ];
 const ROUND_ROBIN_LIST_NAME = 'fundraising_consultants';
 
